@@ -1,0 +1,12 @@
+dash
+plotly
+numpy
+scipy
+gemmi
+pymatgen
+kaleido
+flask-sock
+matplotlib
+pillow
+# Optional but recommended for fragment classification in molecular crystals:
+# molcrys_kit

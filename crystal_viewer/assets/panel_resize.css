@@ -1,0 +1,21 @@
+.panel-splitter {
+  width: 8px;
+  flex: 0 0 8px;
+  cursor: col-resize;
+  background: linear-gradient(to right, #f2f2f2 0%, #d9d9d9 50%, #f2f2f2 100%);
+}
+
+.panel-splitter:hover {
+  background: linear-gradient(to right, #ececec 0%, #bfbfbf 50%, #ececec 100%);
+}
+
+#left-panel,
+#right-panel {
+  box-sizing: border-box;
+}
+
+body.panel-resizing,
+body.panel-resizing * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
