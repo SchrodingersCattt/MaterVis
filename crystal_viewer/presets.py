@@ -31,21 +31,9 @@ DEFAULT_STYLE = {
 }
 
 DEFAULT_CATALOG = {
-    "SY": {
-        "title": "SY  (Cmc2₁, Z=4)",
-        "relative_cif": os.path.join("..", "单晶数据检查文件", "SY", "298k-SY.cif"),
-    },
-    "PEP": {
-        "title": "PEP  (Pbca, Z=16)",
-        "relative_cif": os.path.join("..", "单晶数据检查文件", "单晶数据检查PEP", "298k-PEP.cif"),
-    },
-    "MPEP": {
-        "title": "MPEP  (P2₁/c, Z=4)",
-        "relative_cif": os.path.join("..", "单晶数据检查文件", "单晶数据检查MPEP", "298K-MPEP.cif"),
-    },
-    "HPEP": {
-        "title": "HPEP  (P2₁/c, Z=4)",
-        "relative_cif": os.path.join("..", "单晶数据检查文件", "单晶数据检查HPEP", "298k-HPEP.cif"),
+    "DAP-4": {
+        "title": "DAP-4  (P1, Z=12)",
+        "relative_cif": os.path.join("examples", "data", "DAP-4.cif"),
     },
 }
 
@@ -57,24 +45,9 @@ LOCAL_CATALOG_FILENAMES = (
 )
 
 DEFAULT_STRUCTURE_PRESETS = {
-    "SY": {
-        "view_direction": [-0.24192189559966773, -0.9702957262759965, 0.0],
+    "DAP-4": {
+        "view_direction": [1.0, 0.0, 0.0],
         "up": [0.0, 0.0, 1.0],
-        "show_hydrogen": False,
-    },
-    "PEP": {
-        "view_direction": [-0.2768338134060447, 0.19755746781799224, 0.9403903905636266],
-        "up": [0.05579013787329076, 0.9802913071681004, -0.18951626211683326],
-        "show_hydrogen": False,
-    },
-    "MPEP": {
-        "view_direction": [0.4112857076968057, -0.43468649161027, 0.8011814530154155],
-        "up": [0.15934048006252013, 0.8997166983344863, 0.4063501866020694],
-        "show_hydrogen": False,
-    },
-    "HPEP": {
-        "view_direction": [-0.9596418442823493, 1.175222312928242e-16, -0.2812250534756305],
-        "up": [1.1277925078202266e-16, 1.0, 3.30501957798999e-17],
         "show_hydrogen": False,
     },
 }

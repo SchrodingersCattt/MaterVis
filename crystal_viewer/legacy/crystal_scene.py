@@ -28,21 +28,9 @@ DEFAULT_STYLE = {
 }
 
 DEFAULT_CATALOG = {
-    "SY": {
-        "title": "SY  (Cmc2₁, Z=4)",
-        "relative_cif": os.path.join("..", "单晶数据检查文件", "SY", "298k-SY.cif"),
-    },
-    "PEP": {
-        "title": "PEP  (Pbca, Z=16)",
-        "relative_cif": os.path.join("..", "单晶数据检查文件", "单晶数据检查PEP", "298k-PEP.cif"),
-    },
-    "MPEP": {
-        "title": "MPEP  (P2₁/c, Z=4)",
-        "relative_cif": os.path.join("..", "单晶数据检查文件", "单晶数据检查MPEP", "298K-MPEP.cif"),
-    },
-    "HPEP": {
-        "title": "HPEP  (P2₁/c, Z=4)",
-        "relative_cif": os.path.join("..", "单晶数据检查文件", "单晶数据检查HPEP", "298k-HPEP.cif"),
+    "DAP-4": {
+        "title": "DAP-4  (P1, Z=12)",
+        "relative_cif": os.path.join("examples", "data", "DAP-4.cif"),
     },
 }
 

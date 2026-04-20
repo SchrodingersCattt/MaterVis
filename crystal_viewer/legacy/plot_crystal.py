@@ -6,6 +6,7 @@ thick two-color bonds, matte atoms, smart label placement.
 """
 
 import argparse
+import re
 import gemmi
 import numpy as np
 import matplotlib
@@ -172,34 +173,82 @@ def parse_asu(path):
     if not symops:
         symops = [gemmi.Op('x,y,z')]
 
-    tbl = block.find(['_atom_site_label',
-                      '_atom_site_type_symbol',
-                      '_atom_site_fract_x',
-                      '_atom_site_fract_y',
-                      '_atom_site_fract_z',
-                      '_atom_site_occupancy',
-                      '_atom_site_U_iso_or_equiv',
-                      '_atom_site_disorder_group',
-                      '_atom_site_disorder_assembly'])
-    asu_atoms = []
-    for row in tbl:
-        def g(i, d='.'):
-            return row[i] if i < len(row) else d
-        label = g(0); elem = g(1).strip().capitalize()
+    bond_partners = {}
+    bond_lengths = {}
+    bond_tbl = block.find([
+        '_geom_bond_atom_site_label_1',
+        '_geom_bond_atom_site_label_2',
+        '_geom_bond_distance',
+    ])
+    for row in bond_tbl:
+        a = row[0].strip()
+        b = row[1].strip()
+        if a in ('', '.', '?') or b in ('', '.', '?'):
+            continue
         try:
-            x=float(gemmi.cif.as_number(g(2)))
-            y=float(gemmi.cif.as_number(g(3)))
-            z=float(gemmi.cif.as_number(g(4)))
-        except: continue
-        try: occ = float(gemmi.cif.as_number(g(5)))
-        except: occ = 1.0
-        try: uiso = float(gemmi.cif.as_number(g(6)))
-        except: uiso = 0.04
-        dg = g(7).strip(); da = g(8).strip()
+            dist = float(gemmi.cif.as_number(row[2]))
+        except Exception:
+            dist = None
+        bond_partners.setdefault(a, set()).add(b)
+        bond_partners.setdefault(b, set()).add(a)
+        if dist is not None:
+            bond_lengths.setdefault(a, {}).setdefault(b, []).append(dist)
+            bond_lengths.setdefault(b, {}).setdefault(a, []).append(dist)
+
+    # Read each `_atom_site_*` column independently so we don't fail when the
+    # CIF omits optional tags (e.g. Materials-Studio exports that drop
+    # `_atom_site_disorder_group` / `_atom_site_disorder_assembly`).
+    def _column(tag, *, required=False, default='.'):
+        values = list(block.find_loop(tag))
+        if values:
+            return values
+        if required:
+            raise ValueError(f"CIF is missing required tag: {tag}")
+        return None
+
+    labels = _column('_atom_site_label', required=True)
+    types  = _column('_atom_site_type_symbol')
+    xs     = _column('_atom_site_fract_x', required=True)
+    ys     = _column('_atom_site_fract_y', required=True)
+    zs     = _column('_atom_site_fract_z', required=True)
+    occs   = _column('_atom_site_occupancy')
+    uisos  = _column('_atom_site_U_iso_or_equiv')
+    dgs    = _column('_atom_site_disorder_group')
+    das    = _column('_atom_site_disorder_assembly')
+
+    n_rows = len(labels)
+    if types is None:
+        types = [re.sub(r'\d', '', label) or 'C' for label in labels]
+    asu_atoms = []
+    for i in range(n_rows):
+        label = labels[i]
+        elem = (types[i] if i < len(types) else 'C').strip().capitalize()
+        try:
+            x = float(gemmi.cif.as_number(xs[i]))
+            y = float(gemmi.cif.as_number(ys[i]))
+            z = float(gemmi.cif.as_number(zs[i]))
+        except Exception:
+            continue
+        try:
+            occ = float(gemmi.cif.as_number(occs[i])) if occs else 1.0
+        except Exception:
+            occ = 1.0
+        try:
+            uiso = float(gemmi.cif.as_number(uisos[i])) if uisos else 0.04
+        except Exception:
+            uiso = 0.04
+        dg = (dgs[i] if dgs else '.').strip()
+        da = (das[i] if das else '.').strip()
         asu_atoms.append({'label': label, 'elem': elem,
                           'frac': np.array([x,y,z]),
                           'occ': occ, 'uiso': uiso,
-                          'dg': dg, 'da': da})
+                          'dg': dg, 'da': da,
+                          '_bond_partners': tuple(sorted(bond_partners.get(label, ()))),
+                          '_bond_lengths': {
+                              partner: tuple(lengths)
+                              for partner, lengths in bond_lengths.get(label, {}).items()
+                          },
+                          '_has_bond_table': bool(bond_partners)})
 
     aniso_tbl = block.find(['_atom_site_aniso_label',
                             '_atom_site_aniso_U_11',
@@ -256,7 +305,10 @@ def parse_asu(path):
                           'frac': frac_basic, 'cart': cart_new.copy(),
                           'occ': asu_at['occ'], 'uiso': asu_at['uiso'],
                           'dg': asu_at['dg'], 'da': asu_at['da'],
-                          'U': U_cart})
+                          'U': U_cart,
+                          '_bond_partners': asu_at.get('_bond_partners', ()),
+                          '_bond_lengths': asu_at.get('_bond_lengths', {}),
+                          '_has_bond_table': asu_at.get('_has_bond_table', False)})
 
     # Reassemble fragmented ClO₄ groups
     a_vec = M[:, 0]; b_vec = M[:, 1]; c_vec = M[:, 2]
@@ -347,6 +399,34 @@ def _bond_cutoff(ai, aj):
         return 1.15
     return cov_r(ei) + cov_r(ej) + 0.42
 
+
+def _bond_allowed_by_table(ai, aj):
+    partners_i = ai.get('_bond_partners', ())
+    partners_j = aj.get('_bond_partners', ())
+    has_table = bool(ai.get('_has_bond_table')) or bool(aj.get('_has_bond_table'))
+    if not has_table:
+        return True
+    if partners_i and aj['label'] in partners_i:
+        return True
+    if partners_j and ai['label'] in partners_j:
+        return True
+    return False
+
+
+def _bond_matches_table_distance(ai, aj, distance):
+    has_table = bool(ai.get('_has_bond_table')) or bool(aj.get('_has_bond_table'))
+    if not has_table:
+        return True
+    candidates = []
+    for ref in ai.get('_bond_lengths', {}).get(aj['label'], ()):
+        candidates.append(float(ref))
+    for ref in aj.get('_bond_lengths', {}).get(ai['label'], ()):
+        candidates.append(float(ref))
+    if not candidates:
+        return True
+    tolerance = 0.18 if 'H' in (ai['elem'], aj['elem']) else 0.22
+    return min(abs(distance - ref) for ref in candidates) <= tolerance
+
 # ── Bond finding ────────────────────────────────────────────────────────────
 def find_bonds(atoms, M=None, cell=None):
     """Find bonds, excluding cross-disorder-group bonds."""
@@ -354,6 +434,8 @@ def find_bonds(atoms, M=None, cell=None):
     n = len(atoms)
     for i in range(n):
         for j in range(i+1, n):
+            if not _bond_allowed_by_table(atoms[i], atoms[j]):
+                continue
             if bonds_conflict(atoms[i], atoms[j]):
                 continue
             cutoff = _bond_cutoff(atoms[i], atoms[j])
@@ -366,6 +448,8 @@ def find_bonds(atoms, M=None, cell=None):
                 d = np.linalg.norm(atoms[i]['cart'] - atoms[j]['cart'])
             else:
                 d = np.linalg.norm(bond_vector_mic(atoms[i], atoms[j], M, search_radius=1)[0])
+            if not _bond_matches_table_distance(atoms[i], atoms[j], d):
+                continue
             if d < cutoff:
                 bonds.append((i, j))
     return bonds

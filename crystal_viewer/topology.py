@@ -133,6 +133,14 @@ def extract_coordination_shell(
     )
     shell_distances = [float(item["distance"]) for item in shell]
 
+    # Full pool coords (all candidates, same order as all_distances)
+    pool_coords_arr = (
+        plot_center[None, :] + (
+            np.array([item["center"] for item in candidates], dtype=float)
+            - source_center[None, :]
+        )
+        if candidates else np.zeros((0, 3), dtype=float)
+    )
     return {
         "center_index": int(center_index),
         "center_label": display_label or center_fragment.get("label", f"site-{center_index}"),
@@ -144,10 +152,12 @@ def extract_coordination_shell(
         "coordination_number": cn,
         "gap_info": cn_info,
         "shell": shell,
+        "candidate_fragments": candidates,
         "shell_coords": shell_coords.tolist(),
         "source_shell_coords": source_shell_coords.tolist(),
         "distances": shell_distances,
         "all_distances": [float(item["distance"]) for item in candidates],
+        "pool_coords": pool_coords_arr.tolist(),   # coords for ALL pool neighbours
     }
 
 

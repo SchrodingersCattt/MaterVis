@@ -169,12 +169,13 @@ def _fragment_table_from_atoms(
     M,
     *,
     use_source_indices: bool = True,
+    include_minor: bool = False,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     ops = scene_ops()
     atom_pool = []
     source_indices = []
     for idx, atom in enumerate(atoms):
-        if ops.is_minor(atom):
+        if ops.is_minor(atom) and not include_minor:
             continue
         atom_pool.append(dict(atom))
         source_indices.append(idx if use_source_indices else len(source_indices))
@@ -335,7 +336,7 @@ def build_loaded_crystal(
     )
     initial_scene["fragment_table"] = fragment_table
     initial_scene["atom_fragment_labels"] = atom_fragment_labels
-    topology_fragment_table, _ = _fragment_table_from_atoms(name, raw_atoms, cell, M, use_source_indices=True)
+    topology_fragment_table, _ = _fragment_table_from_atoms(name, raw_atoms, cell, M, use_source_indices=True, include_minor=True)
 
     bundle = LoadedCrystal(
         name=name,
