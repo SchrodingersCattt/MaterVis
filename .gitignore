@@ -15,6 +15,7 @@ catalog.local.json
 
 uploads/
 exports/
+examples/_outputs/
 
 .DS_Store
 Thumbs.db
