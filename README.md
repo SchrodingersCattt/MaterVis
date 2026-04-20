@@ -1,64 +1,197 @@
-# Crystal Viewer
+# MatterVis · crystal_viewer
 
-`crystal_viewer/` is a standalone Dash/Plotly frontend for ABX4 crystal structures. It vendors the legacy scene-building code inside the package, adds CIF upload, coordination-topology analysis, zoom-correct `Mesh3d` rendering, and exposes an automation API for other agents.
+Standalone Dash / Plotly frontend and automation toolkit for molecular
+perchlorate crystals (**A**₂**B**(ClO₄)₄ and friends). CIF in — interactive 3D
+viewer, coordination-topology scores, publication-quality Matplotlib export
+and a REST + WebSocket API for other agents, all out.
 
-## Features
+![banner](docs/images/banner.png)
 
-- Browser-based 3D viewer for local catalog structures and uploaded CIFs
-- Drag-and-drop CIF upload
-- Display scope switcher for formula unit, unit cell, and asymmetric unit
-- Hydrogen and unit-cell-box display toggles
-- `Mesh3d` atom/bond rendering with a fast `Scatter3d` fallback
-- Stronger highlight layer and minor-disorder wireframe overlay
-- Coordination shell extraction, convex-hull overlay, angular RMSD against ideal polyhedra, planarity, and prism/antiprism heuristics
-- REST and WebSocket automation on the same Flask server, including camera control and screenshots
+Everything in this README is reproduced from the bundled
+`examples/data/DAP-4.cif` (a triclinic diammonium diperchlorate `P1` cell,
+see [`examples/data/README.md`](examples/data/README.md)); swap it for your
+own CIF with a single flag.
+
+---
+
+## Highlights
+
+- **Browser viewer** — Dash front-end, drag-and-drop CIF upload, formula /
+  unit-cell / asymmetric-unit display, `Mesh3d` atoms and bonds with a fast
+  `Scatter3d` fallback for large cells.
+- **Coordination topology** — automatic CN detection via the nearest-neighbour
+  gap, angular RMSD vs 12 ideal polyhedra (CN 8-12), planarity RMS of any
+  5-atom subset and a prism / antiprism twist check. See
+  [`docs/scores.md`](docs/scores.md).
+- **Publication export** — vendored ORTEP-style Matplotlib renderer with
+  correct depth ordering, two-colour bonds, smart label placement and
+  configurable presets.
+- **Automation** — REST + WebSocket API on the same Flask server. Drive the
+  viewer from notebooks, agents or subprocesses (`GET /api/v1/state`,
+  `POST /api/v1/topology`, `GET /api/v1/screenshot`, ...).
+- **Zero catalog required** — the package ships with a single public CIF so
+  `python -m crystal_viewer --cif examples/data/DAP-4.cif` just works.
 
 ## Install
 
 ```bash
+git clone https://github.com/SchrodingersCattt/MatterVis.git
+cd MatterVis
 python -m pip install -r requirements.txt
 ```
 
-`molcrys_kit` is optional. If it is available, fragment A/B/X classification uses it. Otherwise the app falls back to simpler element/site heuristics.
+`molcrys_kit` is optional. When available, fragment **A / B / X**
+classification uses it; otherwise `crystal_viewer` falls back to the built-in
+element / site heuristics.
 
-## Run
-
-```bash
-python -m crystal_viewer
-python -m crystal_viewer --port 8051
-python -m crystal_viewer --structure SY PEP
-python -m crystal_viewer --cif my_structure.cif
-```
-
-The app serves a local browser UI and an API under `/api/v1/`.
-
-No CIF files are bundled in this repository. Catalog entries are discovered only if their local paths exist, or from an untracked `catalog.local.json`.
-
-Useful API calls:
+## Launch the browser viewer
 
 ```bash
-curl http://127.0.0.1:8051/api/v1/state
-curl http://127.0.0.1:8051/api/v1/camera
-curl -X POST http://127.0.0.1:8051/api/v1/camera/action -H "Content-Type: application/json" -d "{\"action\":\"zoom\",\"factor\":1.15}"
-curl http://127.0.0.1:8051/api/v1/screenshot --output view.png
+python -m crystal_viewer --cif examples/data/DAP-4.cif
+# Serving crystal viewer at http://127.0.0.1:8051
 ```
+
+Additional flags:
+
+```bash
+python -m crystal_viewer --port 8051            # pick a port
+python -m crystal_viewer --structure DAP-4      # limit catalog to one name
+python -m crystal_viewer --cif a.cif b.cif c.cif
+```
+
+See [`AGENTS.md`](AGENTS.md) for every REST / WebSocket endpoint and the full
+set of stable UI element IDs.
+
+## Headless examples
+
+Every script in [`examples/`](examples) can be run end-to-end without a
+browser:
+
+```bash
+python examples/01_quick_render.py           # CIF -> PNG + interactive HTML
+python examples/02_coordination_analysis.py  # coordination shell + all scores
+python examples/03_display_modes_panel.py    # formula / unit cell / shell
+python examples/04_static_publication.py     # ORTEP-style PNG + PDF
+python examples/05_app_and_api.py            # launch app + drive it via REST
+```
+
+Outputs land under `examples/_outputs/` (gitignored). Regenerate the README
+showcase images with `python docs/build_images.py`.
+
+### 1. `01_quick_render.py` — CIF to unit cell in ten lines
+
+```python
+from crystal_viewer.loader import build_bundle_scene, build_loaded_crystal
+from crystal_viewer.renderer import build_figure
+from crystal_viewer.scene import scene_style
+
+bundle = build_loaded_crystal(name="DAP-4", cif_path="examples/data/DAP-4.cif")
+scene  = build_bundle_scene(bundle, display_mode="unit_cell")
+style  = scene_style(scene, {"show_unit_cell": True})
+
+fig = build_figure(scene, style)
+fig.write_image("dap4.png", width=900, height=720, scale=2)
+fig.write_html("dap4.html", include_plotlyjs="cdn")
+```
+
+![unit cell](docs/images/feature_unit_cell.png)
+
+### 2. `02_coordination_analysis.py` — topology scores with one function call
+
+```python
+from crystal_viewer.loader import build_loaded_crystal
+from crystal_viewer.topology import analyze_topology
+
+bundle = build_loaded_crystal(name="DAP-4", cif_path="examples/data/DAP-4.cif")
+a0 = next(f for f in bundle.topology_fragment_table if f["type"] == "A")
+result = analyze_topology(bundle, center_index=a0["index"], cutoff=8.0)
+
+print(result["coordination_number"])             # 9
+print(result["angular"]["best_match"]["name"])   # tricapped_trigonal_prism
+print(result["gap_info"]["gap_value"])           # 0.124 Å
+```
+
+The example also dumps a tidy `02_coordination_summary.json` with every score
+broken out — see [`docs/scores.md`](docs/scores.md) for a full reference.
+
+<p>
+  <img src="docs/images/feature_coordination.png" alt="coordination hull" width="49%"/>
+  <img src="docs/images/feature_histogram.png"    alt="distance histogram" width="49%"/>
+</p>
+
+### 3. `03_display_modes_panel.py` — side-by-side display modes
+
+A single Plotly figure stitches formula unit, unit cell, and coordination
+shell together so reviewers can switch between them without reloading:
+
+![three modes](docs/images/feature_three_modes.png)
+
+### 4. `04_static_publication.py` — ORTEP-style Matplotlib export
+
+Runs the vendored `crystal_viewer.legacy.plot_crystal` renderer (same code
+used by `POST /api/v1/export`) to produce high-DPI PNG + PDF suitable for
+Nature-style figures:
+
+![publication](docs/images/feature_publication.png)
+
+### 5. `05_app_and_api.py` — drive the live viewer over HTTP
+
+Starts `create_app()` in the background, preloads `DAP-4`, then hits
+`POST /api/v1/topology` and `GET /api/v1/screenshot`. The call sequence is a
+one-page recipe for wiring the viewer into a larger agent pipeline.
+
+## Topology scores
+
+`analyze_topology()` (and the REST `POST /api/v1/topology`) return five
+named scores that together describe a coordination shell. One line summary:
+
+| Score | Module field | What it measures |
+| --- | --- | --- |
+| Coordination number | `coordination_number` + `gap_info.gap_value` | Neighbours in the first shell, picked by the largest distance jump. |
+| Angular RMSD | `angular.best_match`, `angular.results` | Degree of distortion versus 12 ideal polyhedra for CN 8-12. |
+| Planarity RMS | `planarity.best_rms` / `best_indices` | Best-fit plane through any 5 shell atoms (Å). |
+| Prism / antiprism twist | `prism_analysis.twist_deg` / `classification` | Average inter-ring rotation; threshold 18°, only for CN ≥ 10. |
+| Convex hull | `hull.vertices` / `simplices` / `edges` | Geometry the viewer draws as the purple polyhedron. |
+
+See [`docs/scores.md`](docs/scores.md) for how each score is computed,
+reasonable thresholds, and worked numbers for DAP-4.
 
 ## Package layout
 
-- `app.py`: Dash layout, callbacks, backend state
-- `api.py`: REST + WebSocket registration
-- `loader.py`: CIF parsing and fragment bundle loading
-- `scene.py`: wrapper around the vendored legacy scene helpers
-- `renderer.py`: Plotly trace generation
-- `topology.py`: coordination-shell and shape analysis
-- `ideal_polyhedra.py`: reference CN=8..12 polyhedra
-- `presets.py`: preset I/O and default style/catalog
-- `legacy/`: vendored static-export and scene-building modules
+```
+crystal_viewer/
+├── __init__.py          # re-exports create_app
+├── __main__.py          # `python -m crystal_viewer` entry point
+├── app.py               # Dash layout, callbacks, ViewerBackend
+├── api.py               # REST + WebSocket blueprint
+├── loader.py            # CIF parsing and fragment bundle loading
+├── scene.py             # thin wrapper around the vendored scene helpers
+├── renderer.py          # Plotly trace generation (atoms, bonds, hull, axes)
+├── topology.py          # coordination-shell extraction & shape analysis
+├── ideal_polyhedra.py   # reference polyhedra for CN 8-12
+├── presets.py           # preset / style / catalog IO
+├── assets/              # Dash CSS + JS for the panel layout
+└── legacy/              # vendored static-export modules
+examples/                # runnable demo scripts (see section above)
+docs/                    # README showcase images + scores.md
+```
 
 ## Notes
 
-- Screenshot export uses Plotly image export via `kaleido`.
-- Static publication export runs the vendored `crystal_viewer.legacy.plot_crystal` module and writes outputs under `.exports/`.
+- Plotly screenshot export uses `kaleido`; the first call is slow because
+  it spins up a headless Chromium.
+- Static publication export writes to `.exports/` (gitignored).
 - Local presets default to `.local/crystal_view_preset.json`.
-- Local catalog overrides can be supplied via `catalog.local.json` or `.local/catalog.local.json`.
-- For automation details, see `AGENTS.md`.
+- Local catalog overrides can be supplied via `catalog.local.json` or
+  `.local/catalog.local.json`.
+- The CIF parser handles Materials-Studio style loops that omit
+  `_atom_site_disorder_*` columns — no manual cleanup required.
+- For automation details (every endpoint, stable UI IDs, WebSocket schema),
+  see [`AGENTS.md`](AGENTS.md).
+
+## Citing
+
+If you use the bundled example structure, please also credit the originating
+publication that released it — see [`examples/data/README.md`](examples/data/README.md).
+The `crystal_viewer` code itself is released under the repository's root
+license file.
