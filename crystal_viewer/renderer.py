@@ -702,6 +702,20 @@ def axis_key_overlay(scene: dict, style: dict) -> tuple[list[dict], list[dict]]:
     if max_norm < 1e-8:
         return [], []
 
+    # Cap arrow_len so the arrow's **vertical** extent (arrow_len * |dy/norm|)
+    # can never exceed half the row gap. Without this clamp a steeply-
+    # projecting axis on one row can shoot into the neighbouring row and
+    # collide with that row's label, producing the "fragmented triad" look.
+    # Share a single scale factor across all rows so relative lengths are
+    # preserved.
+    max_abs_uy = max(
+        abs(float(label_to_proj[label][1]) / norm) if norm > 1e-8 else 0.0
+        for label, norm in zip(order, norms)
+    )
+    if max_abs_uy > 1e-8:
+        y_budget = 0.42 * row_gap
+        arrow_len = min(arrow_len, y_budget / max_abs_uy)
+
     annotations: list[dict] = []
     shapes: list[dict] = []
     n_rows = len(order)
@@ -722,7 +736,16 @@ def axis_key_overlay(scene: dict, style: dict) -> tuple[list[dict], list[dict]]:
             continue
         ux = float(dx) / norm
         uy = float(dy) / norm
-        length = arrow_len * (norm / max_norm)
+        # Scale arrow length by the axis's 2D projection magnitude so near-
+        # perpendicular axes render as shorter arrows. Impose a minimum so
+        # (a) near-perpendicular axes never collapse to an invisible speck
+        # (the user would read that as a rendering bug) and (b) the shaft is
+        # always longer than the arrowhead — otherwise the head's base
+        # falls behind the arrow's own origin and the triad visibly
+        # fragments into detached triangles.
+        min_scale = 0.65
+        rel = max(norm / max_norm, min_scale)
+        length = max(arrow_len * rel, 1.35 * head_len)
         x0 = anchor_x + label_pad
         y0 = row_y
         x1 = x0 + length * ux
