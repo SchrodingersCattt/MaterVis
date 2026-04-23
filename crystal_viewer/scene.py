@@ -19,6 +19,51 @@ def scene_ops():
     return pc._scene_ops()
 
 
+def _resolve_element_color(elem: str, base: str, overrides: Dict[str, str]) -> str:
+    """Return the publication-style colour for ``elem``. ``overrides`` wins
+    over the vendored palette so figures can add elements (e.g. I, Na, Rb)
+    that aren't in the default table, or re-skin defaults."""
+    if not overrides:
+        return base
+    override = overrides.get(elem)
+    return override if override else base
+
+
+def apply_element_colors(
+    scene: Dict[str, Any],
+    element_colors: Optional[Dict[str, str]] = None,
+    element_colors_light: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    """Apply per-element hex-colour overrides to every atom and bond in an
+    already-built scene. Useful when a caller wants to reuse the default
+    scene-building pipeline but skin elements specially for a publication
+    figure (e.g. colour I purple, Na yellow).
+
+    The scene is modified in place and also returned for chaining. A ``None``
+    or empty dict is a no-op.
+    """
+    if not element_colors and not element_colors_light:
+        return scene
+    ec = element_colors or {}
+    ec_light = element_colors_light or {}
+    by_index: dict[int, tuple[str, str]] = {}
+    for idx, atom in enumerate(scene.get("draw_atoms", [])):
+        elem = atom.get("elem", "")
+        new_color = _resolve_element_color(elem, atom.get("color", ""), ec)
+        new_light = _resolve_element_color(elem, atom.get("color_light", ""), ec_light or ec)
+        atom["color"] = new_color
+        atom["color_light"] = new_light
+        by_index[idx] = (new_color, new_light)
+    for bond in scene.get("bonds", []):
+        ci = by_index.get(int(bond.get("i", -1)))
+        cj = by_index.get(int(bond.get("j", -1)))
+        if ci is not None:
+            bond["color_i"] = ci[0]
+        if cj is not None:
+            bond["color_j"] = cj[0]
+    return scene
+
+
 def _to_builtin(value: Any) -> Any:
     if isinstance(value, np.ndarray):
         return value.tolist()
@@ -146,13 +191,20 @@ def _selected_atoms_for_mode(ops: Any, atoms, M, cell, display_mode: str):
     if display_mode == "asymmetric_unit":
         asym_atoms = _asymmetric_unit_atoms(atoms)
         return _whole_components_in_box(ops, asym_atoms, M, cell)
+    if display_mode == "cluster":
+        # Molecular cluster / isolated fragment: show every atom as parsed,
+        # with no formula-unit trimming or periodic-image reassembly. Bonds
+        # are detected directly from the stored Cartesian coordinates.
+        return [dict(atom) for atom in atoms]
     atoms_out, sel_idxs = ops.select_formula_unit(atoms, M, cell)
     return [atoms_out[idx] for idx in sel_idxs]
 
 
 def _bond_endpoints(ai, aj, cell, display_mode: str):
     start = np.array(ai["cart"], dtype=float)
-    if display_mode == "formula_unit":
+    if display_mode in ("formula_unit", "cluster"):
+        # Plain Euclidean endpoints. For clusters the atoms are already
+        # expressed in Cartesian coordinates with no periodic imaging.
         end = np.array(aj["cart"], dtype=float)
     else:
         end = np.array(pc._nearest_pbc_cart(ai["cart"], aj["cart"], cell), dtype=float)
@@ -198,7 +250,8 @@ def build_scene_from_atoms(
             atom["color_light"] = ops.elem_color_light(atom["elem"])
             atom["atom_radius"] = float(ops.atom_r(atom["elem"]))
 
-    bond_pairs = ops.find_bonds(draw_atoms, cell=cell)
+    effective_cell = None if display_mode == "cluster" else cell
+    bond_pairs = ops.find_bonds(draw_atoms, cell=effective_cell)
     bonds = []
     for i, j in bond_pairs:
         ai = draw_atoms[i]
@@ -220,10 +273,16 @@ def build_scene_from_atoms(
         )
 
     label_items = legacy_scene._label_payload(ops, draw_atoms, view_x, view_y, view_z)
-    bounds = legacy_scene._compute_bounds(draw_atoms or sel_atoms, view_x, view_y, view_z)
+    bounds = legacy_scene._compute_bounds(
+        draw_atoms or sel_atoms,
+        view_x,
+        view_y,
+        view_z,
+        atom_scale=float(style.get("atom_scale", 1.0)),
+    )
     camera = entry.get("camera") or legacy_scene._camera_from_bounds(bounds, view_y, view_z)
 
-    return {
+    scene = {
         "name": name,
         "title": title,
         "cell": cell,
@@ -244,6 +303,12 @@ def build_scene_from_atoms(
         "preset_entry": entry,
         "display_mode": display_mode,
     }
+    apply_element_colors(
+        scene,
+        style.get("element_colors"),
+        style.get("element_colors_light"),
+    )
+    return scene
 
 
 def build_scene_from_cif(

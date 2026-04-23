@@ -146,26 +146,59 @@ def _camera_from_bounds(bounds, view_y, view_z):
     }
 
 
-def _compute_bounds(atoms, view_x, view_y, view_z):
+def _compute_bounds(atoms, view_x, view_y, view_z, *, atom_scale=1.0, extra_pad=0.35):
+    """Compute the world-space bounds used to size the Matplotlib Axes3D
+    viewport. The box is inflated by each atom's visual radius so large
+    elements (e.g. Cl, I, Br) are not clipped at the panel edge.
+
+    Parameters
+    ----------
+    atoms
+        Sequence of atom dicts carrying ``cart`` and optionally ``atom_radius``
+        (set by ``build_scene_from_atoms``).
+    view_x, view_y, view_z
+        Orthonormal screen-space basis vectors.
+    atom_scale
+        Multiplies each atom's ``atom_radius`` when computing padding. Matches
+        ``style["atom_scale"]`` so the bounds stay correct when callers scale
+        the rendered spheres.
+    extra_pad
+        Extra padding in Å added after the radius-aware inflation, for visual
+        breathing room around the structure. Kept at 0.35 Å to preserve the
+        pre-existing Axes3D framing.
+    """
+    empty_bounds = {
+        "center": [0.0, 0.0, 0.0],
+        "ranges": [1.0, 1.0, 1.0],
+        "mins": [0.0, 0.0, 0.0],
+        "maxs": [1.0, 1.0, 1.0],
+        "screen_ranges": [1.0, 1.0, 1.0],
+    }
     if not atoms:
-        return {
-            "center": [0.0, 0.0, 0.0],
-            "ranges": [1.0, 1.0, 1.0],
-            "mins": [0.0, 0.0, 0.0],
-            "maxs": [1.0, 1.0, 1.0],
-            "screen_ranges": [1.0, 1.0, 1.0],
-        }
+        return empty_bounds
     carts = np.array([at["cart"] for at in atoms], dtype=float)
-    mins = carts.min(axis=0)
-    maxs = carts.max(axis=0)
+    radii = np.array(
+        [max(float(at.get("atom_radius", 0.18)), 0.05) for at in atoms],
+        dtype=float,
+    ) * float(atom_scale)
+
+    mins = (carts - radii[:, None]).min(axis=0)
+    maxs = (carts + radii[:, None]).max(axis=0)
+
     sx = carts @ view_x
     sy = carts @ view_y
     sz = carts @ view_z
-    pad_s = 0.5
+    sx_min = float(sx.min() - radii.max())
+    sx_max = float(sx.max() + radii.max())
+    sy_min = float(sy.min() - radii.max())
+    sy_max = float(sy.max() + radii.max())
+    sz_min = float(sz.min() - radii.max())
+    sz_max = float(sz.max() + radii.max())
+    pad_s = float(extra_pad)
     screen_ranges = [
-        float(sx.max() - sx.min() + 2 * pad_s),
-        float(sy.max() - sy.min() + 2 * pad_s),
-        float(sz.max() - sz.min() + 2 * pad_s),
+        (sx_max - sx_min) + 2.0 * pad_s,
+        (sy_max - sy_min) + 2.0 * pad_s,
+        (sz_max - sz_min) + 2.0 * pad_s,
     ]
     return {
         "center": carts.mean(axis=0).tolist(),
@@ -256,7 +289,13 @@ def build_scene_from_atoms(
         })
 
     label_items = _label_payload(ops, draw_atoms, view_x, view_y, view_z)
-    bounds = _compute_bounds(draw_atoms or sel_atoms, view_x, view_y, view_z)
+    bounds = _compute_bounds(
+        draw_atoms or sel_atoms,
+        view_x,
+        view_y,
+        view_z,
+        atom_scale=float(style.get("atom_scale", 1.0)),
+    )
     camera = entry.get("camera") or _camera_from_bounds(bounds, view_y, view_z)
 
     return {

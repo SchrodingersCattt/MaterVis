@@ -669,6 +669,7 @@ def create_app(preset_path: str = DEFAULT_PRESET_PATH, names=None, root_dir: Opt
                             {"label": "Formula unit cluster", "value": "formula_unit"},
                             {"label": "Unit cell", "value": "unit_cell"},
                             {"label": "Asymmetric unit", "value": "asymmetric_unit"},
+                            {"label": "Isolated cluster (no PBC)", "value": "cluster"},
                         ],
                         value=first_state["display_mode"],
                         clearable=False,

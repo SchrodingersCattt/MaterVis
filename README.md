@@ -17,15 +17,19 @@ own CIF with a single flag.
 ## Highlights
 
 - **Browser viewer** — Dash front-end, drag-and-drop CIF upload, formula /
-  unit-cell / asymmetric-unit display, `Mesh3d` atoms and bonds with a fast
-  `Scatter3d` fallback for large cells.
+  unit-cell / asymmetric-unit / isolated-cluster display, `Mesh3d` atoms and
+  bonds with a fast `Scatter3d` fallback for large cells.
 - **Coordination topology** — automatic CN detection via the nearest-neighbour
   gap, angular RMSD vs 12 ideal polyhedra (CN 8-12), planarity RMS of any
   5-atom subset and a prism / antiprism twist check. See
   [`docs/scores.md`](docs/scores.md).
 - **Publication export** — vendored ORTEP-style Matplotlib renderer with
   correct depth ordering, two-colour bonds, smart label placement and
-  configurable presets.
+  configurable presets. Plotly path shares radius-aware viewport bounds so
+  large halides never clip at the panel edge.
+- **Multi-panel figures** — `uniform_viewport(scenes)` stamps a shared
+  world-cube on any list of scenes so every `build_figure` call emits at the
+  same physical length per pixel. Drop-in for N-up comparison figures.
 - **Automation** — REST + WebSocket API on the same Flask server. Drive the
   viewer from notebooks, agents or subprocesses (`GET /api/v1/state`,
   `POST /api/v1/topology`, `GET /api/v1/screenshot`, ...).
@@ -155,6 +159,57 @@ named scores that together describe a coordination shell. One line summary:
 
 See [`docs/scores.md`](docs/scores.md) for how each score is computed,
 reasonable thresholds, and worked numbers for DAP-4.
+
+## Rendering isolated clusters
+
+Perchlorate-cluster CIFs (dummy 100 Å cell, atoms listed in P1, no periodic
+imaging expected) go through a dedicated display mode that skips formula-unit
+trimming and MIC bond search:
+
+```python
+from crystal_viewer.scene import build_scene_from_cif
+from crystal_viewer.renderer import build_figure, uniform_viewport
+from crystal_viewer.presets import DEFAULT_STYLE, deep_merge
+
+# Palette override: add elements not in the vendored table (I, Na, K, Rb, …)
+# or restyle existing ones for a specific figure.
+style = deep_merge(DEFAULT_STYLE, {
+    "show_title": False,
+    "show_labels": False,
+    "show_axes": False,
+    "show_hydrogen": True,
+    "atom_scale": 0.9,
+    "bond_radius": 0.14,
+    "element_colors": {"I": "#940094", "Na": "#E6D11E", "K": "#AB82FF"},
+})
+preset = {"version": 1, "style": style, "structures": {}}
+
+scenes = [
+    build_scene_from_cif(
+        name=name,
+        cif_path=f"clusters/{name}.cif",
+        title=name,
+        preset=preset,
+        show_hydrogen=True,
+        display_mode="cluster",
+    )
+    for name in ("DAI-1", "DAI-4", "DAP-2", "DAP-M4")
+]
+
+# Pin every panel to the same world cube so panel-to-panel scale is identical
+# and no Cl / I atoms clip at the edge. The cube side = biggest scene span +
+# padding (in Å).
+uniform_viewport(scenes, padding=0.5)
+
+for scene in scenes:
+    fig = build_figure(scene, style)
+    fig.write_image(f"{scene['name']}.png", width=600, height=600, scale=2)
+```
+
+Every scene now renders at the same Å-per-pixel, with radius-aware bounds so
+even Cl / I / Br spheres are fully visible. `display_mode="cluster"` honours
+the stored Cartesian coordinates exactly — useful when the CIF encodes a
+hand-curated fragment rather than a crystallographic asymmetric unit.
 
 ## Package layout
 

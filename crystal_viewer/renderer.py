@@ -35,43 +35,149 @@ def _visible_atoms(scene: dict, style: dict):
 
 
 def _scene_ranges(scene: dict, style: dict, topology_data: dict | None = None):
+    """Compute ``[xr, yr, zr]`` axis ranges for the Plotly scene.
+
+    A scene-level ``viewport`` override (set by :func:`uniform_viewport`) wins
+    unconditionally; this is how caller code pins several scenes to a shared
+    world cube so they render at identical screen scale.
+
+    Otherwise the bounds are inflated by each atom's **visual radius** (rather
+    than a blanket 18 % fractional pad) so spheres — especially large halides
+    like Cl, Br, I — are never clipped at the panel edge. Unit-cell corners and
+    topology markers expand the box but do not contribute radii.
+    """
+    override = scene.get("viewport")
+    if override:
+        return [
+            [float(override["x"][0]), float(override["x"][1])],
+            [float(override["y"][0]), float(override["y"][1])],
+            [float(override["z"][0]), float(override["z"][1])],
+        ]
+
     atoms = _visible_atoms(scene, style)
-    coords = [np.array(atom["cart"], dtype=float) for atom in atoms]
+    atom_scale = float(style.get("atom_scale", 1.0))
+
+    atom_mins = None
+    atom_maxs = None
+    if atoms:
+        carts = np.array([atom["cart"] for atom in atoms], dtype=float)
+        radii = np.array(
+            [max(float(atom.get("atom_radius", 0.18)), 0.05) for atom in atoms],
+            dtype=float,
+        ) * atom_scale
+        atom_mins = (carts - radii[:, None]).min(axis=0)
+        atom_maxs = (carts + radii[:, None]).max(axis=0)
+
+    extras = []
     if style.get("show_unit_cell", False):
         a = np.array(scene["M"][:, 0], dtype=float)
         b = np.array(scene["M"][:, 1], dtype=float)
         c = np.array(scene["M"][:, 2], dtype=float)
         for corner in (
             np.zeros(3, dtype=float),
-            a,
-            b,
-            c,
-            a + b,
-            a + c,
-            b + c,
-            a + b + c,
+            a, b, c, a + b, a + c, b + c, a + b + c,
         ):
-            coords.append(corner)
+            extras.append(corner)
     if topology_data:
         center = topology_data.get("center_coords")
         if center is not None:
-            coords.append(np.array(center, dtype=float))
+            extras.append(np.array(center, dtype=float))
         for point in topology_data.get("shell_coords") or []:
-            coords.append(np.array(point, dtype=float))
-    if not coords:
+            extras.append(np.array(point, dtype=float))
+    if extras:
+        extras_arr = np.array(extras, dtype=float)
+        extras_min = extras_arr.min(axis=0)
+        extras_max = extras_arr.max(axis=0)
+        if atom_mins is None:
+            atom_mins, atom_maxs = extras_min, extras_max
+        else:
+            atom_mins = np.minimum(atom_mins, extras_min)
+            atom_maxs = np.maximum(atom_maxs, extras_max)
+
+    if atom_mins is None:
         return [[-1.0, 1.0], [-1.0, 1.0], [-1.0, 1.0]]
-    coords = np.array(coords, dtype=float)
-    mins = coords.min(axis=0)
-    maxs = coords.max(axis=0)
-    span = np.maximum(maxs - mins, 0.8)
-    pad = np.maximum(span * 0.18, 0.35)
-    mins = mins - pad
-    maxs = maxs + pad
+
+    span = np.maximum(atom_maxs - atom_mins, 0.8)
+    # Small breathing-room pad layered on top of radius-aware bounds.
+    pad = np.maximum(span * 0.06, 0.25)
+    mins = atom_mins - pad
+    maxs = atom_maxs + pad
     return [
         [float(mins[0]), float(maxs[0])],
         [float(mins[1]), float(maxs[1])],
         [float(mins[2]), float(maxs[2])],
     ]
+
+
+def uniform_viewport(scenes, *, style=None, padding=0.0):
+    """Stamp a shared world-cube viewport on each scene so ``build_figure``
+    renders them at identical screen scale.
+
+    For every scene the viewport becomes a cube centred on that scene's own
+    atom-bounding centroid. The cube side length equals the largest
+    radius-aware axis-aligned span across **all** input scenes (+ ``padding``
+    in Å on every side). Callers that later draw the scenes in a grid get
+    panels with a single physical length scale — no more "small molecule
+    ballooning to fill the panel while the big one shrinks to pinheads".
+
+    The ``viewport`` key is written in-place on each scene dict. Subsequent
+    calls to :func:`_scene_ranges` (and therefore :func:`build_figure`) honour
+    it and skip their own bounds calculation.
+
+    Parameters
+    ----------
+    scenes
+        Iterable of scene dicts (as returned by ``build_scene_from_cif`` /
+        ``build_scene_from_atoms``).
+    style
+        Optional style dict used to infer ``atom_scale``. When omitted, each
+        scene's own ``scene["style"]`` is consulted with a default of 1.0.
+    padding
+        Extra padding in Å added symmetrically to every face of the cube.
+
+    Returns
+    -------
+    list[dict]
+        The stamped ``viewport`` dicts, one per scene, in the order the
+        scenes were provided.
+    """
+    scenes = list(scenes)
+    if not scenes:
+        return []
+
+    radius_spans = []
+    centroids = []
+    for scene in scenes:
+        scn_style = style if style is not None else scene.get("style") or {}
+        atom_scale = float(scn_style.get("atom_scale", 1.0))
+        atoms = scene.get("draw_atoms") or []
+        if not atoms:
+            radius_spans.append(1.0)
+            centroids.append(np.zeros(3, dtype=float))
+            continue
+        carts = np.array([atom["cart"] for atom in atoms], dtype=float)
+        radii = np.array(
+            [max(float(atom.get("atom_radius", 0.18)), 0.05) for atom in atoms],
+            dtype=float,
+        ) * atom_scale
+        mins = (carts - radii[:, None]).min(axis=0)
+        maxs = (carts + radii[:, None]).max(axis=0)
+        radius_spans.append(float((maxs - mins).max()))
+        centroids.append(0.5 * (mins + maxs))
+
+    half = 0.5 * max(radius_spans) + float(padding)
+    viewports = []
+    for scene, center in zip(scenes, centroids):
+        viewport = {
+            "x": [float(center[0] - half), float(center[0] + half)],
+            "y": [float(center[1] - half), float(center[1] + half)],
+            "z": [float(center[2] - half), float(center[2] + half)],
+            "center": [float(center[0]), float(center[1]), float(center[2])],
+            "half_span": float(half),
+        }
+        scene["viewport"] = viewport
+        viewports.append(viewport)
+    return viewports
 
 
 def _style_bool(style: dict, key: str, default: bool = False) -> bool:
@@ -505,9 +611,14 @@ def _axis_traces(scene: dict, style: dict):
     scale = float(style["axis_scale"]) * screen_span
     color = style.get("axis_color", "#666666")
     opacity = float(style.get("axis_opacity", 0.72))
+    labels = style.get("axes_labels") or ["a", "b", "c"]
+    labels = list(labels) + ["", "", ""]  # pad defensively
 
     traces = []
-    for vec, label in zip([scene["M"][:, 0], scene["M"][:, 1], scene["M"][:, 2]], ["a", "b", "c"]):
+    for vec, label in zip(
+        [scene["M"][:, 0], scene["M"][:, 1], scene["M"][:, 2]],
+        labels[:3],
+    ):
         v = _normalize(vec, [1.0, 0.0, 0.0])
         end = origin + v * scale
         traces.append(
@@ -790,17 +901,34 @@ def build_figure(scene: dict, style: dict, topology_data: dict | None = None) ->
             fig.add_trace(trace)
     fig.add_trace(_atom_selection_trace(scene, style))
 
+    show_title = bool(style.get("show_title", True))
+    title_arg = dict(text=scene["title"], x=0.5) if show_title else None
+    top_margin = 50 if show_title else 0
+
+    # If all three axis ranges share a side (i.e. a caller stamped a cube via
+    # uniform_viewport), lock the aspect ratio to ``cube`` so the camera does
+    # not stretch when Plotly renders to a non-square viewport.
+    xr_span = xr[1] - xr[0]
+    yr_span = yr[1] - yr[0]
+    zr_span = zr[1] - zr[0]
+    is_cube = max(
+        abs(xr_span - yr_span),
+        abs(yr_span - zr_span),
+        abs(xr_span - zr_span),
+    ) < 1e-6
+    aspectmode = "cube" if is_cube else "data"
+
     fig.update_layout(
-        title=dict(text=scene["title"], x=0.5),
+        title=title_arg,
         showlegend=False,
         paper_bgcolor=style.get("background", "#FFFFFF"),
         plot_bgcolor=style.get("background", "#FFFFFF"),
-        margin=dict(l=0, r=0, t=50, b=0),
+        margin=dict(l=0, r=0, t=top_margin, b=0),
         scene=dict(
             xaxis=dict(visible=False, range=xr),
             yaxis=dict(visible=False, range=yr),
             zaxis=dict(visible=False, range=zr),
-            aspectmode="data",
+            aspectmode=aspectmode,
             camera=_plotly_camera_from_scene(scene),
             bgcolor=style.get("background", "#FFFFFF"),
         ),

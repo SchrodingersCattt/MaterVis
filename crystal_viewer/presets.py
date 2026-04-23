@@ -18,6 +18,7 @@ DEFAULT_STYLE = {
     "minor_bond_scale": 0.82,
     "show_labels": True,
     "show_axes": True,
+    "show_title": True,
     "show_hydrogen": False,
     "show_unit_cell": False,
     "show_minor_only": False,
@@ -26,8 +27,15 @@ DEFAULT_STYLE = {
     "axis_scale": 0.14,
     "axis_color": "#666666",
     "axis_opacity": 0.72,
+    "axes_labels": ["a", "b", "c"],
     "fast_rendering": False,
     "topology_enabled": True,
+    # Optional hex-colour overrides for elements not in the vendored palette,
+    # or to re-skin existing ones for publication figures. The ``elements``
+    # dict takes precedence over ``elements_light`` for both primary colour
+    # and highlight colour. Keys are element symbols (e.g. ``"I"``, ``"Na"``).
+    "element_colors": {},
+    "element_colors_light": {},
 }
 
 DEFAULT_CATALOG = {
