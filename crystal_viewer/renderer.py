@@ -648,6 +648,133 @@ def _axis_traces(scene: dict, style: dict):
     return traces
 
 
+def axis_key_overlay(scene: dict, style: dict) -> tuple[list[dict], list[dict]]:
+    """Build Plotly paper-coord annotations + shapes for a corner axis triad.
+
+    The triad is rendered in **screen space** (paper coordinates) rather than
+    inside the 3D scene, so labels and arrows live in a stable figure corner
+    and cannot be clipped by the 3D viewport cube or a caller's outer
+    matplotlib axes. Labels stack in a left-aligned vertical column (one per
+    crystallographic axis, default order c → b → a top-to-bottom), with each
+    label followed by a short arrow pointing in the *projected* direction of
+    that axis. Arrow lengths are normalised so the longest projection fills
+    ``axis_key_arrow_len`` while shorter axes preserve their relative length.
+
+    The arrow body is drawn as a Plotly line ``shape`` and the arrowhead as a
+    filled triangular path — both of which honour ``xref='paper'``. Labels
+    are separate ``annotations`` objects. Returns ``(annotations, shapes)``.
+
+    Set ``style["show_axis_key"] = True`` to include the triad; when off this
+    helper returns empty lists. The projections are read from
+    ``scene["projected_axes"]`` (populated by :func:`scene.build_scene_from_atoms`)
+    and the label strings come from ``style["axes_labels"]`` with stacking
+    order controlled by ``style["axis_key_label_order"]``.
+    """
+    if not style.get("show_axis_key", False):
+        return [], []
+    projections = scene.get("projected_axes")
+    if not projections or len(projections) < 3:
+        return [], []
+
+    axes_labels = list(style.get("axes_labels") or scene.get("axis_labels") or ["a", "b", "c"])[:3]
+    label_to_proj = {axes_labels[i]: projections[i] for i in range(min(3, len(axes_labels)))}
+
+    order = list(style.get("axis_key_label_order") or ["c", "b", "a"])
+    order = [label for label in order if label in label_to_proj]
+    if not order:
+        return [], []
+
+    anchor = style.get("axis_key_anchor") or [0.05, 0.07]
+    anchor_x = float(anchor[0])
+    anchor_y = float(anchor[1])
+    row_gap = float(style.get("axis_key_row_gap", 0.095))
+    arrow_len = float(style.get("axis_key_arrow_len", 0.085))
+    label_pad = float(style.get("axis_key_label_pad", 0.045))
+    font_size = float(style.get("axis_key_font_size", 13))
+    line_width = float(style.get("axis_key_line_width", 1.6))
+    head_len = float(style.get("axis_key_head_len", 0.025))
+    head_width = float(style.get("axis_key_head_width", 0.018))
+    color = style.get("axis_key_color", "#2F2F2F")
+    italic = bool(style.get("axis_key_italic", True))
+
+    norms = [math.hypot(float(label_to_proj[label][0]), float(label_to_proj[label][1])) for label in order]
+    max_norm = max(norms) if norms else 0.0
+    if max_norm < 1e-8:
+        return [], []
+
+    annotations: list[dict] = []
+    shapes: list[dict] = []
+    n_rows = len(order)
+    for row_idx, label in enumerate(order):
+        row_y = anchor_y + (n_rows - 1 - row_idx) * row_gap
+        text = f"<i>{label}</i>" if italic else label
+        annotations.append(dict(
+            x=anchor_x, y=row_y,
+            xref="paper", yref="paper",
+            text=text,
+            showarrow=False,
+            xanchor="left", yanchor="middle",
+            font=dict(size=font_size, color=color),
+        ))
+        dx, dy = label_to_proj[label]
+        norm = math.hypot(float(dx), float(dy))
+        if norm < 1e-8:
+            continue
+        ux = float(dx) / norm
+        uy = float(dy) / norm
+        length = arrow_len * (norm / max_norm)
+        x0 = anchor_x + label_pad
+        y0 = row_y
+        x1 = x0 + length * ux
+        y1 = y0 + length * uy
+        # Arrow shaft (stops just short of the tip to avoid the arrowhead
+        # line-width bleeding past the triangle on retina renders).
+        shaft_end_x = x1 - 0.55 * head_len * ux
+        shaft_end_y = y1 - 0.55 * head_len * uy
+        shapes.append(dict(
+            type="line",
+            xref="paper", yref="paper",
+            x0=x0, y0=y0,
+            x1=shaft_end_x, y1=shaft_end_y,
+            line=dict(color=color, width=line_width),
+            layer="above",
+        ))
+        # Filled triangular arrowhead tip — points from (x1, y1) backward
+        # along (-ux, -uy), with left/right base points straddling the
+        # perpendicular (-uy, ux).
+        base_cx = x1 - head_len * ux
+        base_cy = y1 - head_len * uy
+        px = -uy
+        py = ux
+        base_left_x = base_cx + 0.5 * head_width * px
+        base_left_y = base_cy + 0.5 * head_width * py
+        base_right_x = base_cx - 0.5 * head_width * px
+        base_right_y = base_cy - 0.5 * head_width * py
+        shapes.append(dict(
+            type="path",
+            xref="paper", yref="paper",
+            path=(
+                f"M {x1},{y1} "
+                f"L {base_left_x},{base_left_y} "
+                f"L {base_right_x},{base_right_y} Z"
+            ),
+            fillcolor=color,
+            line=dict(color=color, width=0),
+            layer="above",
+        ))
+    return annotations, shapes
+
+
+def axis_key_annotations(scene: dict, style: dict) -> list[dict]:
+    """Backwards-compatible wrapper returning only the annotations list.
+
+    Prefer :func:`axis_key_overlay` which also returns paper-coord shapes for
+    the arrow shafts and arrowheads.
+    """
+    annotations, _ = axis_key_overlay(scene, style)
+    return annotations
+
+
 def _unit_cell_traces(scene: dict, style: dict):
     if not style.get("show_unit_cell", False):
         return []
@@ -918,7 +1045,7 @@ def build_figure(scene: dict, style: dict, topology_data: dict | None = None) ->
     ) < 1e-6
     aspectmode = "cube" if is_cube else "data"
 
-    fig.update_layout(
+    layout_kwargs = dict(
         title=title_arg,
         showlegend=False,
         paper_bgcolor=style.get("background", "#FFFFFF"),
@@ -933,4 +1060,10 @@ def build_figure(scene: dict, style: dict, topology_data: dict | None = None) ->
             bgcolor=style.get("background", "#FFFFFF"),
         ),
     )
+    key_annotations, key_shapes = axis_key_overlay(scene, style)
+    if key_annotations:
+        layout_kwargs["annotations"] = key_annotations
+    if key_shapes:
+        layout_kwargs["shapes"] = key_shapes
+    fig.update_layout(**layout_kwargs)
     return fig

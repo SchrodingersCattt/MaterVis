@@ -282,6 +282,18 @@ def build_scene_from_atoms(
     )
     camera = entry.get("camera") or legacy_scene._camera_from_bounds(bounds, view_y, view_z)
 
+    # Projected axis directions in screen 2D (a, b, c order). Callers that
+    # want to draw their own axis triad — e.g. as a matplotlib overlay outside
+    # the Plotly render — can consume this directly without re-deriving the
+    # camera basis. Entries are (dx, dy) in "screen right / screen up"
+    # components, matching ``view_x``/``view_y``.
+    M_arr = np.asarray(M, dtype=float)
+    projected_axes = [
+        (float(M_arr[:, i] @ view_x), float(M_arr[:, i] @ view_y))
+        for i in range(3)
+    ]
+    axis_labels = list(style.get("axes_labels") or ["a", "b", "c"])[:3]
+
     scene = {
         "name": name,
         "title": title,
@@ -302,6 +314,10 @@ def build_scene_from_atoms(
         "has_minor": any(bool(atom["is_minor"]) for atom in draw_atoms),
         "preset_entry": entry,
         "display_mode": display_mode,
+        # Axis projection exposed so external callers can draw consistent
+        # legend-style axis keys without re-deriving the camera basis.
+        "projected_axes": projected_axes,
+        "axis_labels": axis_labels,
     }
     apply_element_colors(
         scene,

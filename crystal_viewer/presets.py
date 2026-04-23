@@ -28,6 +28,22 @@ DEFAULT_STYLE = {
     "axis_color": "#666666",
     "axis_opacity": 0.72,
     "axes_labels": ["a", "b", "c"],
+    # Corner axis-key overlay: a compact triad rendered as Plotly paper-coord
+    # annotations so the labels sit cleanly inside a figure corner and can
+    # never be clipped by the 3D viewport or a caller's outer axes. Unlike
+    # ``show_axes`` (the in-scene 3D triad), this overlay renders in 2D screen
+    # space with labels stacked in a left-aligned column. Callers that prefer
+    # to draw their own badge can leave ``show_axis_key`` off and instead use
+    # ``scene["projected_axes"]`` to query the current axis projections.
+    "show_axis_key": False,
+    "axis_key_anchor": [0.05, 0.07],      # lower-left (paper coords)
+    "axis_key_row_gap": 0.095,            # vertical gap between rows (paper)
+    "axis_key_arrow_len": 0.085,          # max arrow length (paper)
+    "axis_key_label_pad": 0.045,          # label→arrow horizontal gap (paper)
+    "axis_key_font_size": 13,             # label font size (points)
+    "axis_key_color": "#2F2F2F",
+    "axis_key_label_order": ["c", "b", "a"],  # top→bottom stacking order
+    "axis_key_italic": True,
     "fast_rendering": False,
     "topology_enabled": True,
     # Optional hex-colour overrides for elements not in the vendored palette,
