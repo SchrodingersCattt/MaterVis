@@ -650,6 +650,27 @@ def _scene_ranges(cube: CubeData, padding: float = 0.6, stride: int = 4) -> list
     return [[float(c - half), float(c + half)] for c in center]
 
 
+DEFAULT_TRACE_ORDER: tuple[str, ...] = ("cell", "orbital", "bonds", "atoms")
+"""Default mesh insertion order in :func:`build_orbital_panel_figure`.
+
+Plotly/WebGL composites transparent meshes in **insertion order** within a
+scene: the trace added LAST is drawn on top. Half-transparent orbital
+isosurfaces therefore overlay any opaque atom/bond meshes inserted after
+them, which makes structures with dense orbitals appear visually
+inconsistent with sparser ones (the molecular skeleton looks "thinner" or
+"washed out" wherever the orbital is delocalised).
+
+Inserting orbitals BEFORE bonds and atoms guarantees the molecular
+skeleton stays legible regardless of orbital density. ``cell`` (the unit
+cell wireframe) goes first so it sits behind everything; if absent it is
+silently skipped.
+
+Override ``trace_order`` in :func:`build_orbital_panel_figure` only when
+deliberately wanting the inverse stacking (e.g. emphasising orbital phase
+over the framework).
+"""
+
+
 def build_orbital_panel_figure(
     cubes: Sequence[CubeData],
     *,
@@ -659,6 +680,9 @@ def build_orbital_panel_figure(
     stride: int = 2,
     show_atoms: bool = True,
     show_bonds: bool = True,
+    show_cell_box: bool = False,
+    cell_box_color: str = "#444444",
+    cell_box_width: float = 3.0,
     positive_color: str = "#D55E00",
     negative_color: str = "#0072B2",
     opacity: float = 0.55,
@@ -671,8 +695,11 @@ def build_orbital_panel_figure(
     use_mesh: bool = True,
     use_atom_spheres: bool = True,
     min_volume_voxels: int = 0,
+    atom_mask_radius: float | None = None,
+    extra_atom_positions: np.ndarray | None = None,
     title_fontsize: int = 14,
     scene_y_top: float = 0.92,
+    trace_order: Sequence[str] = DEFAULT_TRACE_ORDER,
 ) -> go.Figure:
     """Build a single Plotly figure with one 3D scene per cube, side-by-side.
 
@@ -698,10 +725,28 @@ def build_orbital_panel_figure(
     default_camera = dict(eye=dict(x=1.0, y=1.0, z=0.7), up=dict(x=0, y=0, z=1))
     cam = {**default_camera, **(camera or {})}
 
+    valid_kinds = {"cell", "orbital", "bonds", "atoms"}
+    order = tuple(trace_order)
+    unknown = set(order) - valid_kinds
+    if unknown:
+        raise ValueError(
+            f"trace_order contains unknown kinds {sorted(unknown)}; "
+            f"valid kinds are {sorted(valid_kinds)}"
+        )
+
     scene_ids: list[str] = []
     for col, (cube, iso) in enumerate(zip(cubes, isovalues), start=1):
+        # Pre-build each kind so trace_order can route insertion freely.
+        kind_traces: dict[str, list] = {k: [] for k in valid_kinds}
+
+        if show_cell_box and cube.axes is not None:
+            kind_traces["cell"].append(
+                cell_box_trace(cube.lattice, origin=cube.origin,
+                               color=cell_box_color, width=cell_box_width)
+            )
+
         if use_mesh:
-            orb_traces = orbital_mesh_traces(
+            kind_traces["orbital"] = orbital_mesh_traces(
                 cube,
                 isovalue=iso,
                 percentile=percentile,
@@ -710,9 +755,11 @@ def build_orbital_panel_figure(
                 negative_color=negative_color,
                 opacity=opacity,
                 min_volume_voxels=min_volume_voxels,
+                atom_mask_radius=atom_mask_radius,
+                extra_atom_positions=extra_atom_positions,
             )
         else:
-            orb_traces = orbital_isosurface_traces(
+            kind_traces["orbital"] = orbital_isosurface_traces(
                 cube,
                 isovalue=iso,
                 percentile=percentile,
@@ -723,17 +770,21 @@ def build_orbital_panel_figure(
             )
 
         if show_bonds and cube.atoms:
-            for trace in bond_traces(cube, tolerance=bond_tolerance, radius=bond_radius):
-                fig.add_trace(trace, row=1, col=col)
+            kind_traces["bonds"] = list(
+                bond_traces(cube, tolerance=bond_tolerance, radius=bond_radius)
+            )
         if show_atoms and cube.atoms:
             if use_atom_spheres:
-                for trace in atom_sphere_traces(cube, radius_scale=atom_radius_scale):
-                    fig.add_trace(trace, row=1, col=col)
+                kind_traces["atoms"] = list(
+                    atom_sphere_traces(cube, radius_scale=atom_radius_scale)
+                )
             else:
                 size = atom_marker_scale if atom_marker_scale is not None else 5.0
-                fig.add_trace(cube_atom_trace(cube, atom_scale=size), row=1, col=col)
-        for trace in orb_traces:
-            fig.add_trace(trace, row=1, col=col)
+                kind_traces["atoms"] = [cube_atom_trace(cube, atom_scale=size)]
+
+        for kind in order:
+            for trace in kind_traces[kind]:
+                fig.add_trace(trace, row=1, col=col)
 
         scene_id = "scene" if col == 1 else f"scene{col}"
         scene_ids.append(scene_id)
