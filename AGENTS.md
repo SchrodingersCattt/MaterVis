@@ -117,3 +117,74 @@ Style keys honoured by `build_figure` beyond the Dash-driven defaults:
   `["x", "y", "z"]`.
 - `element_colors`, `element_colors_light` — per-element hex overrides
   layered on top of the vendored palette.
+
+## Cube / orbital rendering API (`crystal_viewer.cube`)
+
+Static cube isosurface figures (HOMO/LUMO, spin density, charge density…)
+are produced by helpers in `crystal_viewer.cube`. The library is
+journal-agnostic; project-specific styling (typography, dpi, column
+widths) lives in caller code, not here.
+
+Hard contracts the library guarantees so callers do not have to
+re-derive them:
+
+- **Trace insertion order.** `build_orbital_panel_figure` defaults to
+  `DEFAULT_TRACE_ORDER = ("cell", "orbital", "bonds", "atoms")` so
+  half-transparent isosurfaces are always composited UNDER opaque atoms
+  and bonds. This keeps the molecular skeleton legible regardless of
+  orbital density and ensures panels with sparse vs dense orbitals look
+  visually consistent. Override only when deliberately wanting the
+  inverse stacking; pass `trace_order=(...)` with any subset of
+  `{"cell", "orbital", "bonds", "atoms"}`.
+- **Tiled-cube cleanliness.** When `tile_cube` has been used to extend
+  the volumetric data over PBC images, callers MUST pass both
+  `min_volume_voxels > 0` (drops tiny disconnected lobes from connected-
+  component analysis) and `atom_mask_radius > 0` (zeroes voxels farther
+  than R from any atom) to `orbital_mesh_traces` /
+  `build_orbital_panel_figure`. Without either, marching-cubes will emit
+  floating phantom lobes from PBC-image background noise.
+- **Static export.** Use `export_static` (Kaleido) and prefer
+  `use_mesh=True` (marching-cubes Mesh3d). `go.Isosurface` is an
+  interactive-only fallback because Kaleido currently rasterises it
+  inconsistently across versions.
+- **Atom + bond geometry.** `atom_sphere_traces` and `bond_traces` emit
+  opaque `Mesh3d` primitives with bright lighting defaults
+  (`ambient ≥ 0.75`) so phenyl-heavy or dark-element-heavy structures
+  remain legible in print. Element colors come from `ELEMENT_COLORS`;
+  override per-call via positional or keyword arguments rather than
+  mutating the module dict.
+- **Orbital opacity.** Prefer `opacity=1.0` (or ≥ 0.95) for static
+  publication exports. Plotly Mesh3d resolves overlap with the depth
+  buffer when `opacity == 1.0`, but uses alpha-blending below that — and
+  isosurfaces of HOMO/LUMO orbitals routinely intersect themselves and
+  contain atoms inside, so alpha stacks as `(1-α)^N` and washes out
+  atoms behind/inside the lobes (visible as ghostly pale spheres). Use
+  `opacity < 1.0` only for interactive exploration where seeing inside
+  the lobe is required.
+- **Sign legend.** `sign_legend_annotations` emits paper-coord swatches
+  using unicode `\u25A0` / `\u2212`. HTML entities (`&#9632;`,
+  `&minus;`) corrupt SVG export and must not be reintroduced.
+
+## Camera-projected paper-coord indicators (`crystal_viewer.compass`)
+
+Direction indicators (a/b/c lattice triads, k-paths, dipole/force
+vectors…) should be rendered as paper-coord annotations rather than
+in-scene 3D arrows whenever the 3D content does not have guaranteed
+empty space. The module is layered so each tier is reusable:
+
+1. `camera_screen_basis(camera)` — pure camera math; returns
+   `(right, up)` unit vectors in data space.
+2. `project_to_screen(camera, vectors)` — `(N, 3) → (N, 2)` projection
+   onto the camera image plane.
+3. `paper_arrow_annotations(anchor_xy, deltas_2d, *, fig_size, ...)` —
+   2D arrow + label rendering at a paper anchor; agnostic of where the
+   2D directions came from.
+4. `lattice_compass_annotations(camera, lattice, *, panel_x_domains,
+   fig_size, ...)` — convenience wrapper around 1+2+3 for the common
+   crystal-axes case. Defaults to Wong (2011) colorblind-safe colours
+   and `("a", "b", "c")` labels; every styling parameter (colours,
+   labels, font, anchor, pixel length, label offset, arrow width) is
+   overridable.
+
+For non-crystal use cases (e.g. force vectors on a molecule), compose
+layers 1–3 directly rather than abusing layer 4.

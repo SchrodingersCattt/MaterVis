@@ -77,10 +77,30 @@ python examples/02_coordination_analysis.py  # coordination shell + all scores
 python examples/03_display_modes_panel.py    # formula / unit cell / shell
 python examples/04_static_publication.py     # ORTEP-style PNG + PDF
 python examples/05_app_and_api.py            # launch app + drive it via REST
+python examples/06_cp2k_cube_orbital.py --cube orbital.cube  # CP2K/Gaussian cube isosurfaces
 ```
 
 Outputs land under `examples/_outputs/` (gitignored). Regenerate the README
 showcase images with `python docs/build_images.py`.
+
+### CP2K / Gaussian cube orbitals
+
+MatterVis can render CP2K or Gaussian `.cube` orbital files as paired positive
+and negative Plotly isosurfaces, with atom positions overlaid from the cube
+header:
+
+```bash
+python examples/06_cp2k_cube_orbital.py \
+  --cube /path/to/cp2k-WFN_00292_1-1_0.cube \
+  --output-prefix HOCO \
+  --stride 2 \
+  --percentile 98.5
+```
+
+The reader converts cube coordinates from Bohr to Å and automatically chooses a
+robust isovalue from the absolute-value distribution unless `--isovalue` is
+provided. HTML output is always generated; PNG export is attempted when Kaleido
+is available.
 
 ### 1. `01_quick_render.py` — CIF to unit cell in ten lines
 
