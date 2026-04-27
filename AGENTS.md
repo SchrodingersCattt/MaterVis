@@ -153,6 +153,14 @@ re-derive them:
   remain legible in print. Element colors come from `ELEMENT_COLORS`;
   override per-call via positional or keyword arguments rather than
   mutating the module dict.
+- **Orbital opacity.** Prefer `opacity=1.0` (or ≥ 0.95) for static
+  publication exports. Plotly Mesh3d resolves overlap with the depth
+  buffer when `opacity == 1.0`, but uses alpha-blending below that — and
+  isosurfaces of HOMO/LUMO orbitals routinely intersect themselves and
+  contain atoms inside, so alpha stacks as `(1-α)^N` and washes out
+  atoms behind/inside the lobes (visible as ghostly pale spheres). Use
+  `opacity < 1.0` only for interactive exploration where seeing inside
+  the lobe is required.
 - **Sign legend.** `sign_legend_annotations` emits paper-coord swatches
   using unicode `\u25A0` / `\u2212`. HTML entities (`&#9632;`,
   `&minus;`) corrupt SVG export and must not be reintroduced.
