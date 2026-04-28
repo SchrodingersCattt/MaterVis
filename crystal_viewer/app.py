@@ -183,6 +183,13 @@ class ViewerBackend:
         style.update(entry_style)
         if scene.get("has_minor") and "minor_wireframe" not in preset_style and "minor_wireframe" not in entry_style:
             style["minor_wireframe"] = True
+        # Pick a fragment type that actually exists in this structure (B if a metal
+        # B-site is present, otherwise A, otherwise whatever is first available).
+        types_present = [
+            t for t in ("B", "A", "X")
+            if any(f.get("type") == t for f in scene.get("fragment_table") or [])
+        ]
+        default_frag_type = types_present[0] if types_present else "B"
         return {
             "structure": structure,
             "atom_scale": float(style["atom_scale"]),
@@ -191,7 +198,7 @@ class ViewerBackend:
             "axis_scale": float(style["axis_scale"]),
             "display_options": _display_options_from_style(style),
             "display_mode": style.get("display_mode", scene.get("display_mode", "formula_unit")),
-            "topology_fragment_type": "B",
+            "topology_fragment_type": default_frag_type,
             "topology_site_index": None,
             "topology_enabled": bool(style.get("topology_enabled", True)),
             "fast_rendering": bool(style.get("fast_rendering", False)),
@@ -213,6 +220,28 @@ class ViewerBackend:
             }
             for name in self.structure_names
         ]
+
+    def fragment_type_options(self, structure: Optional[str] = None) -> list[dict[str, str]]:
+        """Dropdown options for fragment-type selector, narrowed to types
+        that actually appear in this structure (so the user doesn't get to
+        pick "B fragments" on a CIF with no metal centers, etc.)."""
+        target = structure or (self.structure_names[0] if self.structure_names else None)
+        if target is None or target not in self.bundles:
+            return [
+                {"label": "A fragments", "value": "A"},
+                {"label": "B fragments", "value": "B"},
+                {"label": "X fragments", "value": "X"},
+            ]
+        bundle = self.get_bundle(target)
+        scene = bundle.scene
+        present = {f.get("type") for f in (scene.get("fragment_table") or [])}
+        labels = {"A": "A (organic cations)", "B": "B (metal centers)", "X": "X (ClO\u2084 / halide)"}
+        opts = []
+        for t in ("B", "A", "X"):
+            if t in present:
+                count = sum(1 for f in scene.get("fragment_table") or [] if f.get("type") == t)
+                opts.append({"label": f"{labels[t]} \u00d7{count}", "value": t})
+        return opts or [{"label": "(no fragments)", "value": "B", "disabled": True}]
 
     def _drop_placeholder(self) -> None:
         if PLACEHOLDER_STRUCTURE in self.structure_names and len(self.structure_names) == 1:
@@ -450,11 +479,13 @@ class ViewerBackend:
             if custom:
                 atom_index = int(custom[0])
                 return self.fragment_index_for_atom(scene, atom_index)
-        candidates = fragments
         if requested_type is not None:
-            filtered = [fragment for fragment in candidates if fragment.get("type") == requested_type]
-            if filtered:
-                candidates = filtered
+            candidates = [fragment for fragment in fragments if fragment.get("type") == requested_type]
+            if not candidates:
+                # Honest about it: user asked for B, no B exists -> no overlay.
+                return None
+        else:
+            candidates = fragments
         if candidates:
             return int(candidates[0]["index"])
         return None
@@ -617,8 +648,27 @@ class ViewerBackend:
         }
 
 
-def create_app(preset_path: str = DEFAULT_PRESET_PATH, names=None, root_dir: Optional[str] = None) -> Dash:
+def create_app(
+    preset_path: str = DEFAULT_PRESET_PATH,
+    names=None,
+    root_dir: Optional[str] = None,
+    cif_paths: Optional[Iterable[str]] = None,
+) -> Dash:
     backend = ViewerBackend(preset_path=preset_path, names=names, root_dir=root_dir)
+    for cif_path in cif_paths or []:
+        bundle = build_loaded_crystal(
+            name=os.path.splitext(os.path.basename(cif_path))[0],
+            cif_path=cif_path,
+            title=os.path.splitext(os.path.basename(cif_path))[0],
+            preset=backend.preset,
+            source="cli",
+        )
+        backend.bundles[bundle.name] = bundle
+        if bundle.name not in backend.structure_names:
+            backend.structure_names.append(bundle.name)
+    backend._drop_placeholder()
+    if backend.structure_names and backend.current_state.get("structure") not in backend.structure_names:
+        backend.current_state = backend.default_state(backend.structure_names[0])
     app = Dash(__name__, assets_folder=os.path.join(PACKAGE_DIR, "assets"))
     app.crystal_backend = backend
 
@@ -695,13 +745,41 @@ def create_app(preset_path: str = DEFAULT_PRESET_PATH, names=None, root_dir: Opt
                         value=["fast"] if first_state.get("fast_rendering") else [],
                     ),
                     html.Label("Atom Scale"),
-                    dcc.Slider(id="atom-scale-slider", min=0.5, max=1.8, step=0.02, value=float(first_state["atom_scale"])),
+                    dcc.Slider(
+                        id="atom-scale-slider",
+                        min=0.5, max=1.8, step=0.02,
+                        value=float(first_state["atom_scale"]),
+                        marks={0.5: "0.5", 1.0: "1.0", 1.5: "1.5", 1.8: "1.8"},
+                        tooltip={"placement": "bottom", "always_visible": False},
+                        updatemode="mouseup",
+                    ),
                     html.Label("Bond Radius"),
-                    dcc.Slider(id="bond-radius-slider", min=0.05, max=0.40, step=0.01, value=float(first_state["bond_radius"])),
+                    dcc.Slider(
+                        id="bond-radius-slider",
+                        min=0.05, max=0.40, step=0.01,
+                        value=float(first_state["bond_radius"]),
+                        marks={0.05: "0.05", 0.20: "0.20", 0.40: "0.40"},
+                        tooltip={"placement": "bottom", "always_visible": False},
+                        updatemode="mouseup",
+                    ),
                     html.Label("Minor Opacity"),
-                    dcc.Slider(id="minor-opacity-slider", min=0.10, max=0.90, step=0.02, value=float(first_state["minor_opacity"])),
+                    dcc.Slider(
+                        id="minor-opacity-slider",
+                        min=0.10, max=0.90, step=0.02,
+                        value=float(first_state["minor_opacity"]),
+                        marks={0.1: "0.1", 0.5: "0.5", 0.9: "0.9"},
+                        tooltip={"placement": "bottom", "always_visible": False},
+                        updatemode="mouseup",
+                    ),
                     html.Label("Axis Scale"),
-                    dcc.Slider(id="axis-scale-slider", min=0.05, max=0.25, step=0.01, value=float(first_state["axis_scale"])),
+                    dcc.Slider(
+                        id="axis-scale-slider",
+                        min=0.05, max=0.25, step=0.01,
+                        value=float(first_state["axis_scale"]),
+                        marks={0.05: "0.05", 0.15: "0.15", 0.25: "0.25"},
+                        tooltip={"placement": "bottom", "always_visible": False},
+                        updatemode="mouseup",
+                    ),
                     html.Hr(),
                     html.H4("Topology"),
                     dcc.Checklist(
@@ -711,11 +789,7 @@ def create_app(preset_path: str = DEFAULT_PRESET_PATH, names=None, root_dir: Opt
                     ),
                     dcc.Dropdown(
                         id="topology-fragment-type",
-                        options=[
-                            {"label": "A fragments", "value": "A"},
-                            {"label": "B fragments", "value": "B"},
-                            {"label": "X fragments", "value": "X"},
-                        ],
+                        options=backend.fragment_type_options(first_state["structure"]),
                         value=first_state["topology_fragment_type"],
                         clearable=False,
                     ),
@@ -801,7 +875,22 @@ def create_app(preset_path: str = DEFAULT_PRESET_PATH, names=None, root_dir: Opt
         return backend.structure_options(), names_out[-1], f"Uploaded CIF(s): {', '.join(names_out)}"
 
     @app.callback(
-        Output("structure-selector", "value"),
+        Output("topology-fragment-type", "options"),
+        Output("topology-fragment-type", "value", allow_duplicate=True),
+        Input("structure-selector", "value"),
+        State("topology-fragment-type", "value"),
+        prevent_initial_call=True,
+    )
+    def refresh_fragment_type_options(structure, current_value):
+        opts = backend.fragment_type_options(structure)
+        valid_values = {opt["value"] for opt in opts if not opt.get("disabled")}
+        new_value = current_value if current_value in valid_values else (
+            opts[0]["value"] if opts else "B"
+        )
+        return opts, new_value
+
+    @app.callback(
+        Output("structure-selector", "value", allow_duplicate=True),
         Output("display-mode-selector", "value"),
         Output("display-options", "value"),
         Output("atom-scale-slider", "value"),
@@ -814,6 +903,7 @@ def create_app(preset_path: str = DEFAULT_PRESET_PATH, names=None, root_dir: Opt
         Output("fast-rendering-toggle", "value"),
         Output("agent-state-store", "data"),
         Input("agent-state-poll", "n_intervals"),
+        prevent_initial_call=True,
     )
     def sync_agent_state(_):
         state = backend.pop_pending_state()
@@ -982,19 +1072,7 @@ def _build_parser():
 
 def main(argv=None):
     args = _build_parser().parse_args(argv)
-    app = create_app(args.preset, names=args.structure, root_dir=WORKSPACE_DIR)
-    backend: ViewerBackend = app.crystal_backend
-    for cif_path in args.cif or []:
-        bundle = build_loaded_crystal(
-            name=os.path.splitext(os.path.basename(cif_path))[0],
-            cif_path=cif_path,
-            title=os.path.splitext(os.path.basename(cif_path))[0],
-            preset=backend.preset,
-            source="cli",
-        )
-        backend.bundles[bundle.name] = bundle
-        if bundle.name not in backend.structure_names:
-            backend.structure_names.append(bundle.name)
+    app = create_app(args.preset, names=args.structure, root_dir=WORKSPACE_DIR, cif_paths=args.cif or [])
     print(f"Serving crystal viewer at http://{args.host}:{args.port}")
     app.run(host=args.host, port=args.port, debug=False)
 

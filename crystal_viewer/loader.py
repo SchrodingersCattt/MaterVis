@@ -209,17 +209,31 @@ def _fragment_table_from_atoms(
         })
 
     x_fragments = [frag for frag in fragments if "Cl" in frag["elem_set"]]
-    organic_fragments = [frag for frag in fragments if "Cl" not in frag["elem_set"] and ("C" in frag["elem_set"] or "N" in frag["elem_set"])]
-    other_fragments = [frag for frag in fragments if frag not in x_fragments and frag not in organic_fragments]
+    non_x = [frag for frag in fragments if frag not in x_fragments]
 
-    if organic_fragments:
-        min_heavy = min(frag["heavy_atom_count"] for frag in organic_fragments)
-        for frag in organic_fragments:
-            frag["type"] = "B" if frag["heavy_atom_count"] == min_heavy else "A"
+    # B-site = isolated heavy atom whose element is NOT a main-group non-metal /
+    # halogen / hydrogen-like organic constituent. This catches metals
+    # (Pb, Mn, K, Rb, Na, Cu, Co, …) and rejects single-atom cations like NH4+
+    # (a cluster of size 1 in heavy-atom space, but the heavy element is N) and
+    # halide counterions (I-, Br-). Anything still containing C or N is an
+    # organic A-site cation; otherwise we fall through to "?".
+    NON_METAL_HEAVY = {
+        "H", "B", "C", "N", "O", "F",
+        "Si", "P", "S", "Cl",
+        "Ge", "As", "Se", "Br",
+        "Sb", "Te", "I",
+    }
+    for frag in non_x:
+        elems = set(frag["elem_set"])
+        is_single_metal = frag["heavy_atom_count"] == 1 and not (elems & NON_METAL_HEAVY)
+        if is_single_metal:
+            frag["type"] = "B"
+        elif elems & {"C", "N"}:
+            frag["type"] = "A"
+        else:
+            frag["type"] = "?"
     for frag in x_fragments:
         frag["type"] = "X"
-    for frag in other_fragments:
-        frag["type"] = "?"
 
     type_order = {"B": 0, "A": 1, "X": 2, "?": 3}
     fragments.sort(

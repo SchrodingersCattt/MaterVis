@@ -1004,21 +1004,60 @@ def topology_histogram_figure(topology_data: dict | None) -> go.Figure:
 
 def topology_results_markdown(topology_data: dict | None) -> str:
     if not topology_data:
-        return "Topology analysis inactive."
+        return (
+            "Topology analysis inactive.\n"
+            "Either no fragment of the requested type exists in this structure, "
+            "or the topology overlay is disabled."
+        )
     angular = topology_data.get("angular", {})
     best = angular.get("best_match")
     planarity = topology_data.get("planarity", {})
     prism = topology_data.get("prism_analysis", {})
+    cn = int(topology_data.get("coordination_number", 0) or 0)
+    gap = (topology_data.get("gap_info") or {}).get("gap_value")
+    shell = topology_data.get("shell") or []
     lines = [
-        f"Center: {topology_data.get('center_label', '?')} ({topology_data.get('center_type', '?')})",
-        f"CN: {topology_data.get('coordination_number', 0)}",
+        f"Center: {topology_data.get('center_label', '?')} "
+        f"({topology_data.get('center_type', '?')})",
+        f"CN: {cn}" + (f"   |   gap = {gap:.3f} \u00c5" if gap is not None else ""),
     ]
+    if shell:
+        neighbours = ", ".join(
+            f"{atom.get('label', '?')}({atom.get('species', '?')}) "
+            f"d={atom.get('distance', 0):.2f}"
+            for atom in shell[:cn or len(shell)]
+        )
+        lines.append(f"Shell: {neighbours}")
     if best:
-        lines.append(f"Best ideal: {best['name']} (angular RMSD {best['angular_rmsd']:.2f}°)")
+        rmsd = best.get("angular_rmsd")
+        rmsd_str = f"{rmsd:.2f}\u00b0" if rmsd is not None else "n/a"
+        lines.append(f"Best ideal polyhedron: {best['name']} (angular RMSD {rmsd_str})")
+    elif cn:
+        if cn < 8:
+            lines.append(
+                f"No ideal-polyhedron reference for CN={cn} "
+                "(angular library only covers CN 8\u201312)."
+            )
+        elif cn > 12:
+            lines.append(
+                f"No ideal-polyhedron reference for CN={cn} "
+                "(angular library only covers CN 8\u201312)."
+            )
+        else:
+            lines.append("No ideal polyhedron matched within the cutoff.")
     if planarity.get("best_rms") is not None:
-        lines.append(f"Best planarity RMS: {planarity['best_rms']:.3f} Å")
+        rms = planarity["best_rms"]
+        warn = ""
+        # A real octahedron / square plane has 4-coplanar RMS << 0.1 Å. Anything
+        # above ~0.5 Å says "this isn't a real coordination polyhedron", which is
+        # exactly the false-positive the misclassified-B-site bug used to surface.
+        if rms > 0.5:
+            warn = "  \u26a0 large \u2014 shell may not be a real coordination polyhedron"
+        lines.append(f"Best planarity RMS: {rms:.3f} \u00c5{warn}")
     if prism.get("classification"):
-        lines.append(f"Prism test: {prism['classification']} ({prism['twist_deg']:.1f}°)")
+        lines.append(
+            f"Prism test: {prism['classification']} ({prism['twist_deg']:.1f}\u00b0)"
+        )
     return "\n".join(lines)
 
 
