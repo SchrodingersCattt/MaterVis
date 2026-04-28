@@ -15,6 +15,29 @@ from .legacy import crystal_scene as legacy_scene  # noqa: E402
 from .legacy import plot_crystal as pc  # noqa: E402
 
 
+def _cluster_components(n_items, pairs):
+    parents = list(range(n_items))
+
+    def find(idx):
+        while parents[idx] != idx:
+            parents[idx] = parents[parents[idx]]
+            idx = parents[idx]
+        return idx
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parents[ra] = rb
+
+    for i, j in pairs:
+        union(int(i), int(j))
+
+    groups: dict[int, list[int]] = {}
+    for idx in range(n_items):
+        groups.setdefault(find(idx), []).append(idx)
+    return [sorted(group) for _, group in sorted(groups.items(), key=lambda kv: min(kv[1]))]
+
+
 def scene_ops():
     return pc._scene_ops()
 
@@ -185,6 +208,75 @@ def _whole_components_in_box(ops: Any, atoms, M, cell):
     return atoms_out
 
 
+def _heavy_stoichiometry(atoms_out, idxs) -> tuple:
+    """Multiset of heavy-atom elements in a cluster, as a hashable signature."""
+    counts: dict[str, int] = {}
+    for idx in idxs:
+        elem = atoms_out[idx].get("elem", "")
+        if elem == "H" or not elem:
+            continue
+        counts[elem] = counts.get(elem, 0) + 1
+    return tuple(sorted(counts.items()))
+
+
+def _augment_formula_unit_with_missing_species(ops, atoms_out, sel_idxs, cell):
+    """Ensure the formula unit shows at least one cluster of every distinct
+    heavy stoichiometry present in the structure.
+
+    The legacy ``select_formula_unit`` rejects any organic cluster smaller
+    than 35% of its anchor's atom count, which silently drops light cations
+    such as NH4+ when they coexist with bulky cations like DABCO (the DAP-4
+    case). We re-cluster the output, look up which stoichiometries are
+    already represented, and append one cluster of each missing species --
+    picking the cluster whose centroid is closest to the existing selection
+    so the formula unit stays spatially coherent. Pure-anion (Cl-bearing)
+    species are left to legacy because the Cl/anion stoichiometry pass
+    already adds up to four of them.
+    """
+    if not sel_idxs:
+        return sel_idxs
+    bond_pairs = ops.find_bonds(atoms_out, cell=cell)
+    components = _cluster_components(len(atoms_out), bond_pairs)
+
+    sel_set = set(sel_idxs)
+    represented: set[tuple] = set()
+    for comp in components:
+        if any(idx in sel_set for idx in comp):
+            sig = _heavy_stoichiometry(atoms_out, comp)
+            if sig:
+                represented.add(sig)
+
+    anchor_centroid = np.mean(
+        [np.array(atoms_out[idx]["cart"], dtype=float) for idx in sel_idxs],
+        axis=0,
+    )
+
+    all_sigs = {_heavy_stoichiometry(atoms_out, comp) for comp in components}
+    augmented = list(sel_idxs)
+    for sig in all_sigs - represented:
+        if not sig:
+            continue
+        elements = {elem for elem, _ in sig}
+        if "Cl" in elements:
+            continue
+        best_comp = None
+        best_dist = float("inf")
+        for comp in components:
+            if _heavy_stoichiometry(atoms_out, comp) != sig:
+                continue
+            centroid = np.mean(
+                [np.array(atoms_out[idx]["cart"], dtype=float) for idx in comp],
+                axis=0,
+            )
+            dist = float(np.linalg.norm(centroid - anchor_centroid))
+            if dist < best_dist:
+                best_dist = dist
+                best_comp = comp
+        if best_comp is not None:
+            augmented.extend(best_comp)
+    return sorted(set(augmented))
+
+
 def _selected_atoms_for_mode(ops: Any, atoms, M, cell, display_mode: str):
     if display_mode == "unit_cell":
         return _whole_components_in_box(ops, atoms, M, cell)
@@ -197,6 +289,7 @@ def _selected_atoms_for_mode(ops: Any, atoms, M, cell, display_mode: str):
         # are detected directly from the stored Cartesian coordinates.
         return [dict(atom) for atom in atoms]
     atoms_out, sel_idxs = ops.select_formula_unit(atoms, M, cell)
+    sel_idxs = _augment_formula_unit_with_missing_species(ops, atoms_out, sel_idxs, cell)
     return [atoms_out[idx] for idx in sel_idxs]
 
 

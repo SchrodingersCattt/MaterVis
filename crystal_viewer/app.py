@@ -34,7 +34,7 @@ from .presets import (
 )
 from .renderer import build_figure, style_from_controls, topology_histogram_figure, topology_results_markdown
 from .scene import scene_json
-from .topology import analyze_topology
+from .topology import analyze_topology, extract_coordination_shell
 
 
 PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -183,13 +183,23 @@ class ViewerBackend:
         style.update(entry_style)
         if scene.get("has_minor") and "minor_wireframe" not in preset_style and "minor_wireframe" not in entry_style:
             style["minor_wireframe"] = True
-        # Pick a fragment type that actually exists in this structure (B if a metal
-        # B-site is present, otherwise A, otherwise whatever is first available).
-        types_present = [
-            t for t in ("B", "A", "X")
-            if any(f.get("type") == t for f in scene.get("fragment_table") or [])
+        # Default selected polyhedron centres: every non-halide species in
+        # the structure. That generalises the old "B-site default" without
+        # baking ABX nomenclature into the UI, and gives the multi-species
+        # tiling view "for free" -- e.g. DAP-4 ships with one polyhedron
+        # around the NH4+ centre and one around each DABCO ring.
+        species_present = self._species_summary(scene.get("fragment_table") or [])
+        anion_only = {"Cl", "Br", "I", "F"}
+        non_anion = [
+            item for item in species_present
+            if not (set(item["elements"]) and set(item["elements"]).issubset(anion_only | {"O"}))
         ]
-        default_frag_type = types_present[0] if types_present else "B"
+        if non_anion:
+            default_species = [item["formula"] for item in non_anion]
+        elif species_present:
+            default_species = [species_present[0]["formula"]]
+        else:
+            default_species = []
         return {
             "structure": structure,
             "atom_scale": float(style["atom_scale"]),
@@ -198,10 +208,9 @@ class ViewerBackend:
             "axis_scale": float(style["axis_scale"]),
             "display_options": _display_options_from_style(style),
             "display_mode": style.get("display_mode", scene.get("display_mode", "formula_unit")),
-            "topology_fragment_type": default_frag_type,
+            "topology_species_keys": list(default_species),
             "topology_site_index": None,
             "topology_enabled": bool(style.get("topology_enabled", True)),
-            "topology_show_all_sites": bool(style.get("topology_show_all_sites", False)),
             "topology_hull_color": str(style.get("topology_hull_color", "#7C5CBF")),
             "fast_rendering": bool(style.get("fast_rendering", False)),
             "camera": scene.get("camera"),
@@ -223,43 +232,51 @@ class ViewerBackend:
             for name in self.structure_names
         ]
 
-    def fragment_type_options(self, structure: Optional[str] = None) -> list[dict[str, str]]:
-        """Dropdown options for fragment-type selector, narrowed to types
-        that actually appear in this structure (so the user doesn't get to
-        pick "B fragments" on a CIF with no metal centers, etc.)."""
+    @staticmethod
+    def _species_summary(fragments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Group fragments by their stoichiometric ``formula`` (e.g. ``C8N1``,
+        ``ClO4``, ``N1``) and return one summary per distinct species,
+        sorted by heavy-atom count then occurrence count.
+
+        This is the species-checkbox source of truth: each entry carries a
+        ``formula`` (the stable selector value), a count, and the elements
+        present so the UI can colour-code or filter without re-deriving
+        from raw fragments."""
+        by_formula: dict[str, dict[str, Any]] = {}
+        for frag in fragments:
+            formula = frag.get("formula") or frag.get("species") or "?"
+            entry = by_formula.get(formula)
+            if entry is None:
+                entry = {
+                    "formula": formula,
+                    "count": 0,
+                    "heavy": int(frag.get("heavy_atom_count", 0) or 0),
+                    "elements": list(frag.get("elem_set") or []),
+                }
+                by_formula[formula] = entry
+            entry["count"] += 1
+        return sorted(by_formula.values(), key=lambda item: (item["heavy"], -item["count"]))
+
+    def species_options(self, structure: Optional[str] = None) -> list[dict[str, Any]]:
+        """Checklist options for the species-based polyhedron selector.
+
+        One entry per stoichiometrically distinct fragment present in the
+        currently displayed scene. Each entry's ``value`` is the formula
+        string (used as a stable group key) and the ``label`` shows the
+        formula together with how many sites it covers, so the user sees
+        e.g. ``C8N1 \u00d72`` for the DABCO rings of DAP-4.
+        """
         target = structure or (self.structure_names[0] if self.structure_names else None)
         if target is None or target not in self.bundles:
-            return [
-                {"label": "A fragments", "value": "A"},
-                {"label": "B fragments", "value": "B"},
-                {"label": "X fragments", "value": "X"},
-            ]
-        bundle = self.get_bundle(target)
-        scene = bundle.scene
-        fragments = scene.get("fragment_table") or []
-        present = {f.get("type") for f in fragments}
-        # Decide whether the B-site here is a real metal (single non-organic
-        # heavy atom) or just the smaller of two organic cations, so the label
-        # is honest. Falls back to the generic phrasing when in doubt.
-        b_label = "B (smaller cation)"
-        b_frags = [f for f in fragments if f.get("type") == "B"]
-        if b_frags:
-            organic_elems = {"H", "B", "C", "N", "O", "F", "Si", "P", "S", "Cl",
-                             "Ge", "As", "Se", "Br", "Sb", "Te", "I"}
-            looks_metallic = all(
-                int(f.get("heavy_atom_count", 0)) == 1
-                and not (set(f.get("elem_set", [])) & organic_elems)
-                for f in b_frags
-            )
-            if looks_metallic:
-                b_label = "B (metal centers)"
-        labels = {"A": "A (larger cations)", "B": b_label, "X": "X (ClO\u2084 / halide)"}
-        opts = []
-        for t in ("B", "A", "X"):
-            if t in present:
-                count = sum(1 for f in fragments if f.get("type") == t)
-                opts.append({"label": f"{labels[t]} \u00d7{count}", "value": t})
-        return opts or [{"label": "(no fragments)", "value": "B", "disabled": True}]
+            return []
+        scene = self.get_bundle(target).scene
+        return [
+            {
+                "label": f"{item['formula']} \u00d7{item['count']}",
+                "value": item["formula"],
+            }
+            for item in self._species_summary(scene.get("fragment_table") or [])
+        ]
 
     def _drop_placeholder(self) -> None:
         if PLACEHOLDER_STRUCTURE in self.structure_names and len(self.structure_names) == 1:
@@ -320,15 +337,39 @@ class ViewerBackend:
             state["display_mode"] = str(patch["display_mode"])
             if "topology_site_index" not in patch:
                 state["topology_site_index"] = None
-        if "topology_fragment_type" in patch:
-            state["topology_fragment_type"] = patch["topology_fragment_type"] or "B"
+        if "topology_species_keys" in patch:
+            value = patch["topology_species_keys"]
+            if value is None:
+                state["topology_species_keys"] = []
+            else:
+                state["topology_species_keys"] = [str(item) for item in value if item is not None]
+        # Legacy A/B/X selection: translate the type to the matching list of
+        # species formulas in the active scene so existing /api/v1 callers (and
+        # the example scripts shipped under examples/) keep working without
+        # learning the new species-checkbox vocabulary.
+        if patch.get("topology_fragment_type"):
+            requested_type = str(patch["topology_fragment_type"])
+            structure = state.get("structure")
+            if structure and structure in self.bundles:
+                fragments = self.get_bundle(structure).scene.get("fragment_table") or []
+                matched = {
+                    f.get("formula") or f.get("species")
+                    for f in fragments
+                    if f.get("type") == requested_type
+                }
+                state["topology_species_keys"] = [k for k in matched if k]
+        if patch.get("topology_show_all_sites") and not state.get("topology_species_keys"):
+            structure = state.get("structure")
+            if structure and structure in self.bundles:
+                fragments = self.get_bundle(structure).scene.get("fragment_table") or []
+                state["topology_species_keys"] = sorted(
+                    {f.get("formula") or f.get("species") for f in fragments if f.get("formula") or f.get("species")}
+                )
         if "topology_site_index" in patch:
             value = patch["topology_site_index"]
             state["topology_site_index"] = None if value in ("", None) else int(value)
         if "topology_enabled" in patch:
             state["topology_enabled"] = bool(patch["topology_enabled"])
-        if "topology_show_all_sites" in patch:
-            state["topology_show_all_sites"] = bool(patch["topology_show_all_sites"])
         if "topology_hull_color" in patch and patch["topology_hull_color"]:
             state["topology_hull_color"] = str(patch["topology_hull_color"])
         if "fast_rendering" in patch:
@@ -392,7 +433,6 @@ class ViewerBackend:
         style["display_mode"] = state.get("display_mode", scene.get("display_mode", "formula_unit"))
         style["fast_rendering"] = bool(state.get("fast_rendering", False))
         style["topology_enabled"] = bool(state.get("topology_enabled", True))
-        style["topology_show_all_sites"] = bool(state.get("topology_show_all_sites", False))
         style["topology_hull_color"] = str(state.get("topology_hull_color", "#7C5CBF"))
         return style
 
@@ -467,11 +507,23 @@ class ViewerBackend:
     def map_display_fragment_to_topology(self, bundle: LoadedCrystal, display_fragment: dict | None) -> Optional[dict[str, Any]]:
         if display_fragment is None:
             return None
+        # Prefer matching by stoichiometric formula (the species-checkbox
+        # identity); fall back to A/B/X type for older payloads where the
+        # formula field hasn't been populated yet.
+        display_formula = display_fragment.get("formula") or display_fragment.get("species")
         candidates = [
             fragment
             for fragment in bundle.topology_fragment_table
-            if fragment.get("type") == display_fragment.get("type")
-        ] or list(bundle.topology_fragment_table)
+            if (fragment.get("formula") or fragment.get("species")) == display_formula
+        ]
+        if not candidates:
+            candidates = [
+                fragment
+                for fragment in bundle.topology_fragment_table
+                if fragment.get("type") == display_fragment.get("type")
+            ]
+        if not candidates:
+            candidates = list(bundle.topology_fragment_table)
         if not candidates:
             return None
         display_frac = np.array(display_fragment.get("frac_center", [0.0, 0.0, 0.0]), dtype=float)
@@ -487,15 +539,17 @@ class ViewerBackend:
         state: dict[str, Any],
         structure: str,
         explicit_site: Optional[int],
-        fragment_type: Optional[str],
+        species_keys: Optional[list[str]],
         click_data: Optional[dict[str, Any]],
     ) -> Optional[int]:
         scene = self.scene_for_state(state)
         fragments = scene.get("fragment_table", [])
-        requested_type = fragment_type if fragment_type not in ("", "Any", None) else None
+        species_set = {str(key) for key in species_keys or [] if key}
         if explicit_site is not None:
             chosen = self._display_fragment(scene, explicit_site)
-            if chosen is not None and (requested_type is None or chosen.get("type") == requested_type):
+            if chosen is not None and (
+                not species_set or (chosen.get("formula") or chosen.get("species")) in species_set
+            ):
                 return int(explicit_site)
         if click_data and click_data.get("points"):
             point = click_data["points"][0]
@@ -503,10 +557,13 @@ class ViewerBackend:
             if custom:
                 atom_index = int(custom[0])
                 return self.fragment_index_for_atom(scene, atom_index)
-        if requested_type is not None:
-            candidates = [fragment for fragment in fragments if fragment.get("type") == requested_type]
+        if species_set:
+            candidates = [
+                fragment
+                for fragment in fragments
+                if (fragment.get("formula") or fragment.get("species")) in species_set
+            ]
             if not candidates:
-                # Honest about it: user asked for B, no B exists -> no overlay.
                 return None
         else:
             candidates = fragments
@@ -520,11 +577,14 @@ class ViewerBackend:
         structure = state["structure"]
         bundle = self.get_bundle(structure)
         scene = self.scene_for_state(state)
+        species_keys = list(state.get("topology_species_keys") or [])
+        if not species_keys:
+            return None
         site_index = self.resolve_topology_site(
             state=state,
             structure=structure,
             explicit_site=state.get("topology_site_index"),
-            fragment_type=state.get("topology_fragment_type"),
+            species_keys=species_keys,
             click_data=click_data,
         )
         if site_index is None:
@@ -542,17 +602,16 @@ class ViewerBackend:
             display_label=display_fragment.get("label") if display_fragment else None,
             display_type=display_fragment.get("type") if display_fragment else None,
         )
-        if not state.get("topology_show_all_sites", False):
-            return primary
-        # Gather hull/center for every other fragment of the same display type so
-        # the renderer can tile a "polyhedra packing" view. The selected
-        # ``primary`` site stays special (it owns the histogram + results panel);
-        # the rest land in ``extra_overlays`` and will be drawn at lower opacity.
-        target_type = display_fragment.get("type") if display_fragment else state.get("topology_fragment_type")
+        # Build hulls for every other fragment whose formula is selected, so
+        # the renderer paints a tiled polyhedra view automatically. The
+        # ``primary`` site keeps the histogram + results panel; the rest land
+        # in ``extra_overlays`` at lower opacity.
+        species_set = {str(key) for key in species_keys}
         extras = []
         primary_display_index = int(display_fragment["index"]) if display_fragment else None
         for frag in scene.get("fragment_table") or []:
-            if target_type and frag.get("type") != target_type:
+            formula_key = frag.get("formula") or frag.get("species")
+            if formula_key not in species_set:
                 continue
             if primary_display_index is not None and int(frag["index"]) == primary_display_index:
                 continue
@@ -560,7 +619,14 @@ class ViewerBackend:
             if mapped is None:
                 continue
             try:
-                extra = analyze_topology(
+                # Extras only feed hull coords + center to the renderer; we
+                # skip the angular / planarity / prism passes that the
+                # primary site needs for the histogram + results panel.
+                # That cuts the heavy ``itertools.combinations`` work in
+                # ``planarity_analysis`` (O(n choose 5)) for every tiled
+                # polyhedron, which is the main reason a checkbox flick
+                # used to wedge the UI for ~1.5 s on dense structures.
+                extra = extract_coordination_shell(
                     bundle,
                     center_index=int(mapped["index"]),
                     cutoff=cutoff,
@@ -852,17 +918,17 @@ def create_app(
                         options=[{"label": "Show topology overlay", "value": "enabled"}],
                         value=["enabled"] if first_state.get("topology_enabled", True) else [],
                     ),
-                    dcc.Dropdown(
-                        id="topology-fragment-type",
-                        options=backend.fragment_type_options(first_state["structure"]),
-                        value=first_state["topology_fragment_type"],
-                        clearable=False,
+                    html.Label(
+                        "Polyhedron centres (check one or more species)",
+                        style={"fontSize": "13px", "marginTop": "6px", "display": "block"},
                     ),
                     dcc.Checklist(
-                        id="topology-show-all",
-                        options=[{"label": "Tile every site of selected type (\u591a\u9762\u4f53\u5bc6\u94fa)", "value": "all"}],
-                        value=["all"] if first_state.get("topology_show_all_sites", False) else [],
-                        style={"marginTop": "6px"},
+                        id="topology-species",
+                        options=backend.species_options(first_state["structure"]),
+                        value=list(first_state.get("topology_species_keys") or []),
+                        style={"marginTop": "4px"},
+                        inputStyle={"marginRight": "6px"},
+                        labelStyle={"display": "block", "fontFamily": "monospace"},
                     ),
                     html.Div(
                         [
@@ -882,7 +948,7 @@ def create_app(
                     dcc.Input(
                         id="topology-site-index",
                         type="number",
-                        placeholder="Site / fragment index (blank = first / click in viewer)",
+                        placeholder="Primary site index (blank = first match / click in viewer)",
                         value=first_state["topology_site_index"],
                         style={"width": "100%", "marginTop": "8px"},
                     ),
@@ -961,19 +1027,22 @@ def create_app(
         return backend.structure_options(), names_out[-1], f"Uploaded CIF(s): {', '.join(names_out)}"
 
     @app.callback(
-        Output("topology-fragment-type", "options"),
-        Output("topology-fragment-type", "value", allow_duplicate=True),
+        Output("topology-species", "options"),
+        Output("topology-species", "value", allow_duplicate=True),
         Input("structure-selector", "value"),
-        State("topology-fragment-type", "value"),
+        State("topology-species", "value"),
         prevent_initial_call=True,
     )
-    def refresh_fragment_type_options(structure, current_value):
-        opts = backend.fragment_type_options(structure)
-        valid_values = {opt["value"] for opt in opts if not opt.get("disabled")}
-        new_value = current_value if current_value in valid_values else (
-            opts[0]["value"] if opts else "B"
-        )
-        return opts, new_value
+    def refresh_species_options(structure, current_value):
+        opts = backend.species_options(structure)
+        valid_values = {opt["value"] for opt in opts}
+        keep = [v for v in (current_value or []) if v in valid_values]
+        if not keep:
+            # Re-derive a sensible default for the freshly selected structure
+            # rather than leaving the checkbox group empty.
+            default = backend.default_state(structure).get("topology_species_keys") or []
+            keep = list(default)
+        return opts, keep
 
     @app.callback(
         Output("structure-selector", "value", allow_duplicate=True),
@@ -983,10 +1052,9 @@ def create_app(
         Output("bond-radius-slider", "value"),
         Output("minor-opacity-slider", "value"),
         Output("axis-scale-slider", "value"),
-        Output("topology-fragment-type", "value"),
+        Output("topology-species", "value"),
         Output("topology-site-index", "value"),
         Output("topology-toggle", "value"),
-        Output("topology-show-all", "value"),
         Output("topology-hull-color", "value"),
         Output("fast-rendering-toggle", "value"),
         Output("agent-state-store", "data"),
@@ -996,7 +1064,7 @@ def create_app(
     def sync_agent_state(_):
         state = backend.pop_pending_state()
         if not state:
-            return (no_update,) * 14
+            return (no_update,) * 13
         return (
             state["structure"],
             state["display_mode"],
@@ -1005,10 +1073,9 @@ def create_app(
             state["bond_radius"],
             state["minor_opacity"],
             state["axis_scale"],
-            state["topology_fragment_type"],
+            list(state.get("topology_species_keys") or []),
             state["topology_site_index"],
             ["enabled"] if state.get("topology_enabled", True) else [],
-            ["all"] if state.get("topology_show_all_sites", False) else [],
             state.get("topology_hull_color", "#7C5CBF"),
             ["fast"] if state.get("fast_rendering", False) else [],
             state,
@@ -1023,10 +1090,9 @@ def create_app(
         Input("bond-radius-slider", "value"),
         Input("minor-opacity-slider", "value"),
         Input("axis-scale-slider", "value"),
-        Input("topology-fragment-type", "value"),
+        Input("topology-species", "value"),
         Input("topology-site-index", "value"),
         Input("topology-toggle", "value"),
-        Input("topology-show-all", "value"),
         Input("topology-hull-color", "value"),
         Input("fast-rendering-toggle", "value"),
         Input("crystal-graph", "relayoutData"),
@@ -1040,10 +1106,9 @@ def create_app(
         bond_radius,
         minor_opacity,
         axis_scale,
-        fragment_type,
+        species_keys,
         site_index,
         topology_toggle,
-        topology_show_all,
         topology_hull_color,
         fast_rendering_toggle,
         relayout_data,
@@ -1058,7 +1123,7 @@ def create_app(
                 state=backend.normalize_state({"structure": structure, "display_mode": display_mode, "display_options": display_options}),
                 structure=structure,
                 explicit_site=explicit_site,
-                fragment_type=fragment_type,
+                species_keys=list(species_keys or []),
                 click_data=click_data,
             )
         else:
@@ -1072,10 +1137,9 @@ def create_app(
                 "bond_radius": bond_radius,
                 "minor_opacity": minor_opacity,
                 "axis_scale": axis_scale,
-                "topology_fragment_type": fragment_type,
+                "topology_species_keys": list(species_keys or []),
                 "topology_site_index": resolved_site,
                 "topology_enabled": "enabled" in (topology_toggle or []),
-                "topology_show_all_sites": "all" in (topology_show_all or []),
                 "topology_hull_color": topology_hull_color or "#7C5CBF",
                 "fast_rendering": "fast" in (fast_rendering_toggle or []),
                 "camera": camera,
@@ -1095,10 +1159,9 @@ def create_app(
         Input("bond-radius-slider", "value"),
         Input("minor-opacity-slider", "value"),
         Input("axis-scale-slider", "value"),
-        Input("topology-fragment-type", "value"),
+        Input("topology-species", "value"),
         Input("topology-site-index", "value"),
         Input("topology-toggle", "value"),
-        Input("topology-show-all", "value"),
         Input("topology-hull-color", "value"),
         Input("fast-rendering-toggle", "value"),
         Input("crystal-graph", "clickData"),
@@ -1112,10 +1175,9 @@ def create_app(
         bond_radius,
         minor_opacity,
         axis_scale,
-        fragment_type,
+        species_keys,
         site_index,
         topology_toggle,
-        topology_show_all,
         topology_hull_color,
         fast_rendering_toggle,
         click_data,
@@ -1131,10 +1193,9 @@ def create_app(
                 "bond_radius": bond_radius,
                 "minor_opacity": minor_opacity,
                 "axis_scale": axis_scale,
-                "topology_fragment_type": fragment_type,
+                "topology_species_keys": list(species_keys or []),
                 "topology_site_index": None if site_index in ("", None) else int(site_index),
                 "topology_enabled": "enabled" in (topology_toggle or []),
-                "topology_show_all_sites": "all" in (topology_show_all or []),
                 "topology_hull_color": topology_hull_color or "#7C5CBF",
                 "fast_rendering": "fast" in (fast_rendering_toggle or []),
             }

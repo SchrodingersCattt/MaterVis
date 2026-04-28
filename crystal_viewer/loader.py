@@ -198,6 +198,20 @@ def _fragment_table_from_atoms(
             continue
         center_cart = np.mean([atom["cart"] for atom in center_atoms], axis=0)
         center_frac = np.mean([atom["frac"] for atom in center_atoms], axis=0)
+        elem_counts: dict[str, int] = {}
+        for atom in heavy_atoms:
+            elem = atom["elem"]
+            elem_counts[elem] = elem_counts.get(elem, 0) + 1
+        # Hill-ish ordering for the public formula: C, N, then alphabetical.
+        # (Pure mineral fragments without C come out alphabetical.) The result
+        # is a stable string identifier we can group on across A/B/X labels --
+        # e.g. "C8N1" is the DAP-4 DABCO ring; "N1" is the NH4+.
+        ordered: list[tuple[str, int]] = []
+        for elem in ("C", "N"):
+            if elem in elem_counts:
+                ordered.append((elem, elem_counts.pop(elem)))
+        ordered.extend(sorted(elem_counts.items()))
+        formula = "".join(f"{elem}{count}" if count > 1 else elem for elem, count in ordered) or "?"
         fragments.append({
             "site_indices": site_indices,
             "center": [float(x) for x in center_cart],
@@ -206,6 +220,7 @@ def _fragment_table_from_atoms(
             "heavy_atom_count": len(heavy_atoms),
             "cluster_size": len(component_atoms),
             "species": "".join(sorted(elem_set)) or "?",
+            "formula": formula,
         })
 
     x_fragments = [frag for frag in fragments if "Cl" in frag["elem_set"]]
@@ -272,6 +287,8 @@ def _fragment_table_from_atoms(
             "type": frag_type,
             "label": f"{frag_type}{label_index}",
             "species": frag["species"],
+            "formula": frag.get("formula"),
+            "elem_set": frag.get("elem_set", []),
             "center": frag["center"],
             "frac_center": frag["frac_center"],
             "site_indices": frag["site_indices"],

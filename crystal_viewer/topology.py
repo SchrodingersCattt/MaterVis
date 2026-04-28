@@ -31,14 +31,21 @@ def _lattice_vectors(bundle) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 
 
 def _neighbor_types(fragments: list[dict[str, Any]], center_type: str) -> list[str]:
+    """Pick which fragment types should populate the neighbour pool.
+
+    XYn perovskite-style chemistry: cations (A or B) are coordinated by
+    anions (X), and X is coordinated by cations. We treat A and B as a
+    *single class* of cation when X is the centre; otherwise the classifier's
+    A/B size split would arbitrarily exclude half of the surrounding cage
+    just because half the cations happen to be heavier than the others.
+    """
     available = {frag.get("type", "?") for frag in fragments}
     if center_type in ("A", "B") and "X" in available:
         return ["X"]
     if center_type == "X":
-        if "B" in available:
-            return ["B"]
-        if "A" in available:
-            return ["A"]
+        cations = [t for t in ("A", "B") if t in available]
+        if cations:
+            return cations
     return [frag_type for frag_type in ("B", "A", "X", "?") if frag_type in available and frag_type != center_type]
 
 
@@ -56,7 +63,7 @@ def _translation_grid(bundle, cutoff: float) -> list[tuple[int, int, int, np.nda
     return translations
 
 
-def _neighbor_pool(bundle, center_fragment: dict, cutoff: float) -> list[dict[str, Any]]:
+def _neighbor_pool_uncached(bundle, center_fragment: dict, cutoff: float) -> list[dict[str, Any]]:
     fragments = classify_fragments(bundle)
     center_type = center_fragment.get("type", "?")
     allowed_types = set(_neighbor_types(fragments, center_type))
@@ -84,24 +91,230 @@ def _neighbor_pool(bundle, center_fragment: dict, cutoff: float) -> list[dict[st
     return candidates
 
 
-def detect_coordination_number(distances: Sequence[float], fallback_max: int | None = None) -> dict[str, Any]:
+def _neighbor_pool(bundle, center_fragment: dict, cutoff: float) -> list[dict[str, Any]]:
+    """Cached PBC neighbour search. Bundle topology is immutable after load,
+    so the (center_index, cutoff) tuple uniquely determines the result --
+    invaluable when the species checkbox triggers analyze_topology for many
+    sites in quick succession."""
+    cache = getattr(bundle, "_neighbor_pool_cache", None)
+    if cache is None:
+        cache = {}
+        try:
+            bundle._neighbor_pool_cache = cache
+        except Exception:
+            return _neighbor_pool_uncached(bundle, center_fragment, cutoff)
+    key = (int(center_fragment.get("index", -1)), float(cutoff))
+    if key not in cache:
+        cache[key] = _neighbor_pool_uncached(bundle, center_fragment, cutoff)
+    return cache[key]
+
+
+DEFAULT_CENTROID_OFFSET_FRAC = 0.15
+
+
+def _hull_encloses_center(
+    coords: np.ndarray,
+    center: np.ndarray,
+    *,
+    centroid_offset_frac: float = DEFAULT_CENTROID_OFFSET_FRAC,
+    face_tol: float = 1e-3,
+) -> bool:
+    """True iff ``center`` is *centred inside* the convex hull of ``coords``.
+
+    A coordination polyhedron XYn is geometrically meaningful only when X
+    sits roughly at the middle of the cage of Y. Two conditions have to hold:
+
+    1. **Topological enclosure** - ``center`` must be on the interior side
+       of every face of ``ConvexHull(coords)``. This rejects shells that
+       bulge entirely onto one side of X.
+    2. **Centrality** - the centroid of ``coords`` must be within
+       ``centroid_offset_frac`` of the mean shell radius from ``center``.
+       This rejects "tetrahedral pocket" configurations where X is
+       topologically enclosed but pressed against one face - chemically
+       those are not XYn polyhedra, they are partial coordination spheres.
+
+    Together the two checks turn what was a topological enclosure test
+    into a chemically defensible "X really sits inside Yn" predicate.
+    """
+    coords = np.asarray(coords, dtype=float)
+    center = np.asarray(center, dtype=float)
+    if len(coords) < 4 or ConvexHull is None:
+        return False
+    try:
+        hull = ConvexHull(coords)
+    except Exception:
+        return False
+    plane_vals = hull.equations[:, :3] @ center + hull.equations[:, 3]
+    if np.any(plane_vals > face_tol):
+        return False
+    centroid = coords.mean(axis=0)
+    radii = np.linalg.norm(coords - centroid, axis=1)
+    mean_radius = float(np.mean(radii)) if len(radii) else 0.0
+    if mean_radius < 1e-6:
+        return True
+    offset = float(np.linalg.norm(center - centroid))
+    return offset <= centroid_offset_frac * mean_radius
+
+
+def detect_coordination_number(
+    distances: Sequence[float],
+    fallback_max: int | None = None,
+    *,
+    coords: Sequence[Sequence[float]] | None = None,
+    center: Sequence[float] | None = None,
+    enforce_enclosure: bool = True,
+    centroid_offset_frac: float = DEFAULT_CENTROID_OFFSET_FRAC,
+) -> dict[str, Any]:
+    """Choose a coordination number (CN) for an ordered list of neighbour distances.
+
+    The base heuristic is the largest gap in the sorted distance list - the
+    classical "first coordination shell" cut. When ``coords`` and ``center``
+    are provided **and** ``enforce_enclosure`` is true, the chosen shell is
+    additionally required to satisfy the XYn definition: the chosen shell
+    must topologically enclose X **and** keep X within
+    ``centroid_offset_frac`` of the mean shell radius from the shell
+    centroid (chemical centrality). If the gap-defined CN fails either of
+    those, the search walks CN monotonically upward until both conditions
+    are met or the candidate pool is exhausted.
+
+    The returned payload includes the raw gap-only CN under
+    ``primary_gap_cn`` and an ``enclosed`` flag describing whether the
+    *final* shell actually wraps the centre, so the UI can warn loudly
+    when no enclosing shell is reachable inside the search cutoff.
+    """
     sorted_distances = np.sort(np.array(distances, dtype=float))
-    if len(sorted_distances) == 0:
-        return {"coordination_number": 0, "gap_index": None, "gap_value": None}
-    if len(sorted_distances) == 1:
-        return {"coordination_number": 1, "gap_index": 0, "gap_value": 0.0}
+    n = len(sorted_distances)
+    if n == 0:
+        return {
+            "coordination_number": 0, "gap_index": None, "gap_value": None,
+            "enclosed": False, "enclosure_expanded": False,
+            "primary_gap_cn": 0, "sorted_distances": [], "gaps": [],
+        }
+    if n == 1:
+        return {
+            "coordination_number": 1, "gap_index": 0, "gap_value": 0.0,
+            "enclosed": False, "enclosure_expanded": False,
+            "primary_gap_cn": 1, "sorted_distances": sorted_distances.tolist(), "gaps": [],
+        }
 
     gaps = np.diff(sorted_distances)
-    cn = int(np.argmax(gaps) + 1)
+    primary_cn = int(np.argmax(gaps) + 1)
+    cn = primary_cn
+    enclosed = False
+    expanded = False
+
+    coords_arr = np.asarray(coords, dtype=float) if coords is not None else None
+    center_arr = np.asarray(center, dtype=float) if center is not None else None
+    if (
+        enforce_enclosure
+        and coords_arr is not None
+        and center_arr is not None
+        and len(coords_arr) >= 4
+    ):
+        # Coords arrive in distance-sorted order (caller's contract).
+        if _hull_encloses_center(
+            coords_arr[:primary_cn], center_arr,
+            centroid_offset_frac=centroid_offset_frac,
+        ):
+            enclosed = True
+        else:
+            # Walk CN monotonically upward from primary_gap_cn. This is
+            # less clever than a gap-ranked walk but it matches chemistry:
+            # if the natural first-shell cut doesn't actually wrap X then
+            # the next "complete" shell is at the smallest super-shell that
+            # achieves both topological enclosure and centrality, regardless
+            # of where the gap maxima fall.
+            for candidate_cn in range(primary_cn + 1, len(coords_arr) + 1):
+                if candidate_cn < 4:
+                    continue
+                if _hull_encloses_center(
+                    coords_arr[:candidate_cn], center_arr,
+                    centroid_offset_frac=centroid_offset_frac,
+                ):
+                    cn = candidate_cn
+                    enclosed = True
+                    expanded = True
+                    break
+
     if fallback_max is not None:
         cn = min(cn, int(fallback_max))
+    cn = max(1, cn)
+    gap_index = min(cn - 1, len(gaps) - 1) if len(gaps) > 0 else None
+    gap_value = float(gaps[gap_index]) if gap_index is not None else None
     return {
-        "coordination_number": max(1, cn),
-        "gap_index": cn - 1,
-        "gap_value": float(gaps[cn - 1]),
+        "coordination_number": cn,
+        "gap_index": gap_index,
+        "gap_value": gap_value,
         "sorted_distances": sorted_distances.tolist(),
         "gaps": gaps.tolist(),
+        "primary_gap_cn": primary_cn,
+        "enclosed": enclosed,
+        "enclosure_expanded": expanded,
     }
+
+
+def _extract_coordination_shell_static(
+    bundle,
+    center_index: int,
+    cutoff: float,
+) -> dict[str, Any]:
+    """Run the geometric part of ``extract_coordination_shell`` -- everything
+    that depends only on (bundle, center_index, cutoff) and not on the
+    per-call display-coordinate offsets. The result is cacheable; the
+    public wrapper layers display fields on top of a shallow copy."""
+    fragments = classify_fragments(bundle)
+    center_fragment = next((frag for frag in fragments if int(frag["index"]) == int(center_index)), None)
+    if center_fragment is None:
+        raise IndexError(f"Unknown fragment index: {center_index}")
+    source_center = np.array(center_fragment["center"], dtype=float)
+    candidates = _neighbor_pool(bundle, center_fragment, cutoff=cutoff)
+    candidate_coords = (
+        np.array([item["center"] for item in candidates], dtype=float)
+        if candidates else np.zeros((0, 3), dtype=float)
+    )
+    cn_info = detect_coordination_number(
+        [item["distance"] for item in candidates],
+        coords=candidate_coords,
+        center=source_center,
+        enforce_enclosure=True,
+    )
+    cn = int(cn_info["coordination_number"])
+    shell = candidates[:cn]
+    source_shell_coords = (
+        np.array([item["center"] for item in shell], dtype=float)
+        if shell else np.zeros((0, 3), dtype=float)
+    )
+    shell_distances = [float(item["distance"]) for item in shell]
+    return {
+        "center_index": int(center_index),
+        "default_label": center_fragment.get("label", f"site-{center_index}"),
+        "default_type": center_fragment.get("type", "?"),
+        "center_formula": center_fragment.get("formula") or center_fragment.get("species"),
+        "source_center_coords": source_center,
+        "cutoff": float(cutoff),
+        "neighbor_pool_size": len(candidates),
+        "coordination_number": cn,
+        "gap_info": cn_info,
+        "shell": shell,
+        "candidate_fragments": candidates,
+        "source_shell_coords": source_shell_coords,
+        "distances": shell_distances,
+        "all_distances": [float(item["distance"]) for item in candidates],
+    }
+
+
+def _cached_extract_static(bundle, center_index: int, cutoff: float) -> dict[str, Any]:
+    cache = getattr(bundle, "_shell_cache", None)
+    if cache is None:
+        cache = {}
+        try:
+            bundle._shell_cache = cache
+        except Exception:
+            return _extract_coordination_shell_static(bundle, center_index, cutoff)
+    key = (int(center_index), float(cutoff))
+    if key not in cache:
+        cache[key] = _extract_coordination_shell_static(bundle, center_index, cutoff)
+    return cache[key]
 
 
 def extract_coordination_shell(
@@ -113,51 +326,38 @@ def extract_coordination_shell(
     display_label: str | None = None,
     display_type: str | None = None,
 ) -> dict[str, Any]:
-    fragments = classify_fragments(bundle)
-    center_fragment = next((frag for frag in fragments if int(frag["index"]) == int(center_index)), None)
-    if center_fragment is None:
-        raise IndexError(f"Unknown fragment index: {center_index}")
-
-    source_center = np.array(center_fragment["center"], dtype=float)
+    static = _cached_extract_static(bundle, int(center_index), float(cutoff))
+    source_center = np.asarray(static["source_center_coords"], dtype=float)
     plot_center = source_center if display_center is None else np.array(display_center, dtype=float)
-    candidates = _neighbor_pool(bundle, center_fragment, cutoff=cutoff)
+    delta = plot_center - source_center
 
-    cn_info = detect_coordination_number([item["distance"] for item in candidates])
-    cn = int(cn_info["coordination_number"])
-    shell = candidates[:cn]
-    source_shell_coords = np.array([item["center"] for item in shell], dtype=float) if shell else np.zeros((0, 3), dtype=float)
+    source_shell_coords = np.asarray(static["source_shell_coords"], dtype=float)
     shell_coords = (
-        plot_center[None, :] + (source_shell_coords - source_center[None, :])
-        if len(source_shell_coords)
-        else np.zeros((0, 3), dtype=float)
+        source_shell_coords + delta if len(source_shell_coords) else np.zeros((0, 3), dtype=float)
     )
-    shell_distances = [float(item["distance"]) for item in shell]
-
-    # Full pool coords (all candidates, same order as all_distances)
+    candidates = static["candidate_fragments"]
     pool_coords_arr = (
-        plot_center[None, :] + (
-            np.array([item["center"] for item in candidates], dtype=float)
-            - source_center[None, :]
-        )
+        np.array([item["center"] for item in candidates], dtype=float) + delta
         if candidates else np.zeros((0, 3), dtype=float)
     )
     return {
         "center_index": int(center_index),
-        "center_label": display_label or center_fragment.get("label", f"site-{center_index}"),
-        "center_type": display_type or center_fragment.get("type", "?"),
+        "center_label": display_label or static["default_label"],
+        "center_type": display_type or static["default_type"],
+        "center_formula": static["center_formula"],
         "center_coords": plot_center.tolist(),
         "source_center_coords": source_center.tolist(),
         "cutoff": float(cutoff),
-        "neighbor_pool_size": len(candidates),
-        "coordination_number": cn,
-        "gap_info": cn_info,
-        "shell": shell,
+        "neighbor_pool_size": static["neighbor_pool_size"],
+        "coordination_number": static["coordination_number"],
+        "gap_info": static["gap_info"],
+        "shell": static["shell"],
         "candidate_fragments": candidates,
         "shell_coords": shell_coords.tolist(),
         "source_shell_coords": source_shell_coords.tolist(),
-        "distances": shell_distances,
-        "all_distances": [float(item["distance"]) for item in candidates],
-        "pool_coords": pool_coords_arr.tolist(),   # coords for ALL pool neighbours
+        "distances": static["distances"],
+        "all_distances": static["all_distances"],
+        "pool_coords": pool_coords_arr.tolist(),
     }
 
 
@@ -259,14 +459,13 @@ def convex_hull_payload(shell_coords: Iterable[Iterable[float]]) -> dict[str, An
     }
 
 
-def analyze_topology(
+def _analyze_topology_uncached(
     bundle,
     center_index: int,
-    cutoff: float = 10.0,
-    *,
-    display_center: Iterable[float] | None = None,
-    display_label: str | None = None,
-    display_type: str | None = None,
+    cutoff: float,
+    display_center,
+    display_label,
+    display_type,
 ) -> dict[str, Any]:
     shell = extract_coordination_shell(
         bundle,
@@ -289,3 +488,54 @@ def analyze_topology(
         "prism_analysis": prism,
         "hull": hull,
     }
+
+
+def analyze_topology(
+    bundle,
+    center_index: int,
+    cutoff: float = 10.0,
+    *,
+    display_center: Iterable[float] | None = None,
+    display_label: str | None = None,
+    display_type: str | None = None,
+) -> dict[str, Any]:
+    """Cached primary-site analysis. The heavy ``planarity_analysis`` pass
+    runs ``itertools.combinations`` of size 5 over the shell, which gets
+    expensive for CN=12 / large neighbour pools. We key the cache on the
+    static (center_index, cutoff) tuple -- the full bundle topology is
+    immutable once loaded -- so flipping species checkboxes back and forth
+    no longer redoes the work."""
+    cache = getattr(bundle, "_analyze_topology_cache", None)
+    if cache is None:
+        cache = {}
+        try:
+            bundle._analyze_topology_cache = cache
+        except Exception:
+            return _analyze_topology_uncached(
+                bundle, center_index, cutoff,
+                display_center, display_label, display_type,
+            )
+    key = (int(center_index), float(cutoff))
+    cached = cache.get(key)
+    if cached is None:
+        cached = _analyze_topology_uncached(
+            bundle, center_index, cutoff,
+            None, None, None,  # cache on the static result; overlay display fields below
+        )
+        cache[key] = cached
+    # Display fields shift per call (camera / formula-unit centering); patch
+    # them onto a shallow copy so the cache stays generic.
+    out = dict(cached)
+    if display_center is not None:
+        plot_center = np.array(display_center, dtype=float)
+        source_center = np.array(out.get("source_center_coords", plot_center), dtype=float)
+        delta = plot_center - source_center
+        out["center_coords"] = plot_center.tolist()
+        if out.get("source_shell_coords"):
+            shell = np.array(out["source_shell_coords"], dtype=float) + delta
+            out["shell_coords"] = shell.tolist()
+    if display_label is not None:
+        out["center_label"] = display_label
+    if display_type is not None:
+        out["center_type"] = display_type
+    return out

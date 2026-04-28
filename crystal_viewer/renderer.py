@@ -575,8 +575,8 @@ def _label_traces(scene: dict, style: dict):
     if not style.get("show_labels", True):
         return []
     # Use a single font size for every atom label (was 10 vs 11 split by
-    # minor-disorder flag, which read as "字号不一致" rather than "minor").
-    # Disorder is conveyed by colour only; size stays uniform.
+    # minor-disorder flag, which read as inconsistent typography rather than
+    # signalling "minor"). Disorder is conveyed by colour only; size stays uniform.
     label_size = float(style.get("label_font_size", 12))
     buckets = {
         False: {"x": [], "y": [], "z": [], "text": [], "color": "#111111"},
@@ -1064,13 +1064,28 @@ def topology_results_markdown(topology_data: dict | None) -> str:
     planarity = topology_data.get("planarity", {})
     prism = topology_data.get("prism_analysis", {})
     cn = int(topology_data.get("coordination_number", 0) or 0)
-    gap = (topology_data.get("gap_info") or {}).get("gap_value")
+    gap_info = topology_data.get("gap_info") or {}
+    gap = gap_info.get("gap_value")
+    primary_gap_cn = gap_info.get("primary_gap_cn")
+    enclosed = bool(gap_info.get("enclosed"))
+    enclosure_expanded = bool(gap_info.get("enclosure_expanded"))
     shell = topology_data.get("shell") or []
+    center_formula = topology_data.get("center_formula") or topology_data.get("center_species")
+    center_descriptor = center_formula or topology_data.get("center_type", "?")
     lines = [
-        f"Center: {topology_data.get('center_label', '?')} "
-        f"({topology_data.get('center_type', '?')})",
+        f"Center: {topology_data.get('center_label', '?')} ({center_descriptor})",
         f"CN: {cn}" + (f"   |   gap = {gap:.3f} \u00c5" if gap is not None else ""),
     ]
+    if enclosure_expanded and primary_gap_cn is not None:
+        lines.append(
+            f"  (gap-only CN was {primary_gap_cn}; expanded so the hull "
+            "actually wraps the centre — XYn requires X inside the Y cage.)"
+        )
+    elif not enclosed and cn >= 4:
+        lines.append(
+            "  \u26a0 hull does not enclose centre even at the cutoff. "
+            "Consider raising the search cutoff or treat this as a partial shell."
+        )
     if shell:
         neighbours = ", ".join(
             f"{atom.get('label', '?')}({atom.get('species', '?')}) "

@@ -15,8 +15,17 @@ preset save/load.
   Accepts any subset of:
   `structure`, `display_mode`, `atom_scale`, `bond_radius`,
   `minor_opacity`, `axis_scale`, `display_options`,
-  `topology_fragment_type`, `topology_site_index`, `topology_enabled`,
+  `topology_species_keys` (list of stoichiometric formulas like
+  `"C8N1"`, `"ClO4"`, `"N1"` -- one polyhedron per matching fragment
+  for every key in the list, which gives a tiled view "for free"),
+  `topology_site_index` (primary site for the histogram /
+  results panel), `topology_enabled`, `topology_hull_color`,
   `fast_rendering`, `camera`, `cutoff`.
+
+  Legacy aliases that still work: `topology_fragment_type` (`"A"` /
+  `"B"` / `"X"`) is translated to the matching list of species keys
+  in the active scene, and `topology_show_all_sites: true` selects
+  every species at once.
   `display_mode` accepts `formula_unit`, `unit_cell`, `asymmetric_unit`,
   or `cluster` (free molecular cluster — every parsed atom is drawn,
   no formula-unit trim, no periodic imaging of bonds).

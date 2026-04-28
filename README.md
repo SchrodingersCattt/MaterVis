@@ -44,9 +44,12 @@ cd MatterVis
 python -m pip install -r requirements.txt
 ```
 
-`molcrys_kit` is optional. When available, fragment **A / B / X**
-classification uses it; otherwise `crystal_viewer` falls back to the built-in
-element / site heuristics.
+`molcrys_kit` is optional. When available the per-fragment **A / B / X**
+heuristic falls back to its classifier; otherwise `crystal_viewer` uses its
+built-in element / size heuristics. The browser UI doesn't expose A/B/X
+labels directly -- it lists the stoichiometric formulas it detects (e.g.
+`C6N2 ×2`, `ClO4 ×4`, `N ×1`) so the same controls work for non-perovskite
+crystals.
 
 ## Launch the browser viewer
 
@@ -59,9 +62,39 @@ Additional flags:
 
 ```bash
 python -m crystal_viewer --port 8051            # pick a port
+python -m crystal_viewer --host 0.0.0.0         # bind on all interfaces
 python -m crystal_viewer --structure DAP-4      # limit catalog to one name
-python -m crystal_viewer --cif a.cif b.cif c.cif
+python -m crystal_viewer --cif a.cif --cif b.cif --cif c.cif
 ```
+
+`--cif` is `action="append"` -- repeat the flag once per CIF file you want to
+preload. The viewer listens on `127.0.0.1` by default; pass `--host 0.0.0.0`
+when the dev box is behind a port-forwarding proxy (see below).
+
+### Remote dev boxes (Bohrium and friends)
+
+Container platforms typically only expose a small range of ports. On a
+**Bohrium tech development machine** the public proxy maps the URL
+`http://<your-id>.bohrium.tech:5000X` straight through to container port
+`5000X` for `X` in `1..5` -- nothing else is reachable from outside. Two
+common gotchas:
+
+1. **Bind to `0.0.0.0`.** Loopback-only listeners (the `--host 127.0.0.1`
+   default) never see traffic from the platform proxy.
+2. **Use one of `50001`-`50005`.** Other ports on the container may be in
+   use by Jupyter / MCP servers; check with `ss -ltn | grep 5000` before
+   you pick one.
+
+Putting it together for a Bohrium dev box:
+
+```bash
+python -m crystal_viewer.app --host 0.0.0.0 --port 50001 \
+  --cif examples/data/DAP-4.cif --cif examples/data/SY.cif
+# Reachable at http://<your-id>.bohrium.tech:50001/
+```
+
+If the URL still ERR_CONNECTION_REFUSED, port `50001` is already taken on
+that container -- pick another from the `50001-50005` window.
 
 See [`AGENTS.md`](AGENTS.md) for every REST / WebSocket endpoint and the full
 set of stable UI element IDs.
@@ -127,8 +160,9 @@ from crystal_viewer.loader import build_loaded_crystal
 from crystal_viewer.topology import analyze_topology
 
 bundle = build_loaded_crystal(name="DAP-4", cif_path="examples/data/DAP-4.cif")
-a0 = next(f for f in bundle.topology_fragment_table if f["type"] == "A")
-result = analyze_topology(bundle, center_index=a0["index"], cutoff=8.0)
+# Pick the first DABCO ring -- in DAP-4 those have stoichiometry C6N2.
+target = next(f for f in bundle.topology_fragment_table if f.get("formula") == "C6N2")
+result = analyze_topology(bundle, center_index=target["index"], cutoff=8.0)
 
 print(result["coordination_number"])             # 9
 print(result["angular"]["best_match"]["name"])   # tricapped_trigonal_prism
