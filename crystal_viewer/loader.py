@@ -211,27 +211,40 @@ def _fragment_table_from_atoms(
     x_fragments = [frag for frag in fragments if "Cl" in frag["elem_set"]]
     non_x = [frag for frag in fragments if frag not in x_fragments]
 
-    # B-site = isolated heavy atom whose element is NOT a main-group non-metal /
-    # halogen / hydrogen-like organic constituent. This catches metals
-    # (Pb, Mn, K, Rb, Na, Cu, Co, …) and rejects single-atom cations like NH4+
-    # (a cluster of size 1 in heavy-atom space, but the heavy element is N) and
-    # halide counterions (I-, Br-). Anything still containing C or N is an
-    # organic A-site cation; otherwise we fall through to "?".
+    # A vs B classification follows the molecular-perchlorate convention
+    # A2B(ClO4)4: B is the *smaller* non-X cluster. This handles three cases:
+    #   1. Real metal B-site: single heavy atom (size = 1) is the smallest by
+    #      definition -> B. Organic cations are bigger -> A.
+    #   2. Pure organic salt with two distinct cation sizes (e.g. PEP has
+    #      heavy=4 and heavy=6 cations): smallest -> B, larger -> A.
+    #   3. Pure organic salt with a single cation type (e.g. DAP-4 has two
+    #      identical heavy=8 cations): only one size class exists -> all A.
+    # Non-organic, non-X clusters (e.g. lone halide counterions) fall through
+    # to "?" so they don't pollute either A or B.
     NON_METAL_HEAVY = {
         "H", "B", "C", "N", "O", "F",
         "Si", "P", "S", "Cl",
         "Ge", "As", "Se", "Br",
         "Sb", "Te", "I",
     }
+    organic_or_metal = []
     for frag in non_x:
         elems = set(frag["elem_set"])
         is_single_metal = frag["heavy_atom_count"] == 1 and not (elems & NON_METAL_HEAVY)
-        if is_single_metal:
-            frag["type"] = "B"
-        elif elems & {"C", "N"}:
-            frag["type"] = "A"
+        is_organic = bool(elems & {"C", "N"})
+        if is_single_metal or is_organic:
+            organic_or_metal.append(frag)
         else:
             frag["type"] = "?"
+    if organic_or_metal:
+        sizes = sorted({frag["heavy_atom_count"] for frag in organic_or_metal})
+        if len(sizes) >= 2:
+            smallest = sizes[0]
+            for frag in organic_or_metal:
+                frag["type"] = "B" if frag["heavy_atom_count"] == smallest else "A"
+        else:
+            for frag in organic_or_metal:
+                frag["type"] = "A"
     for frag in x_fragments:
         frag["type"] = "X"
 

@@ -84,6 +84,12 @@ def _scene_ranges(scene: dict, style: dict, topology_data: dict | None = None):
             extras.append(np.array(center, dtype=float))
         for point in topology_data.get("shell_coords") or []:
             extras.append(np.array(point, dtype=float))
+        for overlay in topology_data.get("extra_overlays") or []:
+            ovc = overlay.get("center_coords")
+            if ovc is not None:
+                extras.append(np.array(ovc, dtype=float))
+            for point in overlay.get("shell_coords") or []:
+                extras.append(np.array(point, dtype=float))
     if extras:
         extras_arr = np.array(extras, dtype=float)
         extras_min = extras_arr.min(axis=0)
@@ -568,9 +574,13 @@ def _highlight_traces(scene: dict, style: dict):
 def _label_traces(scene: dict, style: dict):
     if not style.get("show_labels", True):
         return []
+    # Use a single font size for every atom label (was 10 vs 11 split by
+    # minor-disorder flag, which read as "字号不一致" rather than "minor").
+    # Disorder is conveyed by colour only; size stays uniform.
+    label_size = float(style.get("label_font_size", 12))
     buckets = {
         False: {"x": [], "y": [], "z": [], "text": [], "color": "#111111"},
-        True: {"x": [], "y": [], "z": [], "text": [], "color": "#777777"},
+        True: {"x": [], "y": [], "z": [], "text": [], "color": "#999999"},
     }
     for item in scene["label_items"]:
         if style.get("show_minor_only", False) and not item["is_minor"]:
@@ -592,7 +602,7 @@ def _label_traces(scene: dict, style: dict):
                 z=bucket["z"],
                 mode="text",
                 text=bucket["text"],
-                textfont=dict(size=10 if is_minor else 11, color=bucket["color"]),
+                textfont=dict(size=label_size, color=bucket["color"]),
                 hoverinfo="skip",
                 showlegend=False,
             )
@@ -955,31 +965,71 @@ def shell_atom_traces(shell_coords, distances, color="#7C5CBF"):
     ]
 
 
-def topology_traces(topology_data: dict | None):
+def topology_traces(topology_data: dict | None, style: dict | None = None):
     if not topology_data:
         return []
+    style = style or {}
+    hull_color = str(style.get("topology_hull_color", "#7C5CBF"))
+    primary_opacity = 0.22
+    extra_opacity = 0.12
+
     traces = []
-    shell_coords = topology_data.get("shell_coords") or []
-    center = topology_data.get("center_coords")
-    distances = topology_data.get("distances") or []
-    hull_trace = hull_mesh_trace(shell_coords, color="#7C5CBF", opacity=0.16)
-    if hull_trace is not None:
-        traces.append(hull_trace)
-    traces.extend(hull_edge_traces(shell_coords, color="#7C5CBF"))
-    if center is not None:
-        traces.extend(shell_center_lines(center, shell_coords))
-        traces.append(
-            go.Scatter3d(
-                x=[float(center[0])],
-                y=[float(center[1])],
-                z=[float(center[2])],
-                mode="markers",
-                marker=dict(size=14, color="#E07C24", opacity=0.95, line=dict(color="#FFFFFF", width=1.5)),
-                hovertemplate=f"{topology_data.get('center_label', 'center')}<extra></extra>",
-                showlegend=False,
-            )
+
+    def _add_overlay(coords, center, *, opacity, edge_color, draw_marker, label, distances=None):
+        if coords is None:
+            coords = []
+        hull = hull_mesh_trace(coords, color=hull_color, opacity=opacity)
+        if hull is not None:
+            traces.append(hull)
+        traces.extend(hull_edge_traces(coords, color=edge_color))
+        if center is not None and len(coords) > 0:
+            # connecting lines only for the primary overlay; extras would clutter
+            if draw_marker:
+                traces.extend(shell_center_lines(center, coords))
+                traces.append(
+                    go.Scatter3d(
+                        x=[float(center[0])],
+                        y=[float(center[1])],
+                        z=[float(center[2])],
+                        mode="markers",
+                        marker=dict(size=14, color="#E07C24", opacity=0.95, line=dict(color="#FFFFFF", width=1.5)),
+                        hovertemplate=f"{label}<extra></extra>",
+                        showlegend=False,
+                    )
+                )
+            else:
+                traces.append(
+                    go.Scatter3d(
+                        x=[float(center[0])],
+                        y=[float(center[1])],
+                        z=[float(center[2])],
+                        mode="markers",
+                        marker=dict(size=8, color=hull_color, opacity=0.55, line=dict(color="#FFFFFF", width=1.0)),
+                        hovertemplate=f"{label}<extra></extra>",
+                        showlegend=False,
+                    )
+                )
+        if draw_marker and distances:
+            traces.extend(shell_atom_traces(coords, distances, color=hull_color))
+
+    _add_overlay(
+        topology_data.get("shell_coords") or [],
+        topology_data.get("center_coords"),
+        opacity=primary_opacity,
+        edge_color=hull_color,
+        draw_marker=True,
+        label=topology_data.get("center_label", "center"),
+        distances=topology_data.get("distances") or [],
+    )
+    for extra in topology_data.get("extra_overlays") or []:
+        _add_overlay(
+            extra.get("shell_coords") or [],
+            extra.get("center_coords"),
+            opacity=extra_opacity,
+            edge_color=hull_color,
+            draw_marker=False,
+            label=extra.get("center_label", "center"),
         )
-    traces.extend(shell_atom_traces(shell_coords, distances))
     return traces
 
 
@@ -1086,7 +1136,7 @@ def build_figure(scene: dict, style: dict, topology_data: dict | None = None) ->
     for trace in _unit_cell_traces(scene, style):
         fig.add_trace(trace)
     if style.get("topology_enabled", True):
-        for trace in topology_traces(topology_data):
+        for trace in topology_traces(topology_data, style):
             fig.add_trace(trace)
     fig.add_trace(_atom_selection_trace(scene, style))
 

@@ -201,6 +201,8 @@ class ViewerBackend:
             "topology_fragment_type": default_frag_type,
             "topology_site_index": None,
             "topology_enabled": bool(style.get("topology_enabled", True)),
+            "topology_show_all_sites": bool(style.get("topology_show_all_sites", False)),
+            "topology_hull_color": str(style.get("topology_hull_color", "#7C5CBF")),
             "fast_rendering": bool(style.get("fast_rendering", False)),
             "camera": scene.get("camera"),
             "cutoff": 10.0,
@@ -234,12 +236,28 @@ class ViewerBackend:
             ]
         bundle = self.get_bundle(target)
         scene = bundle.scene
-        present = {f.get("type") for f in (scene.get("fragment_table") or [])}
-        labels = {"A": "A (organic cations)", "B": "B (metal centers)", "X": "X (ClO\u2084 / halide)"}
+        fragments = scene.get("fragment_table") or []
+        present = {f.get("type") for f in fragments}
+        # Decide whether the B-site here is a real metal (single non-organic
+        # heavy atom) or just the smaller of two organic cations, so the label
+        # is honest. Falls back to the generic phrasing when in doubt.
+        b_label = "B (smaller cation)"
+        b_frags = [f for f in fragments if f.get("type") == "B"]
+        if b_frags:
+            organic_elems = {"H", "B", "C", "N", "O", "F", "Si", "P", "S", "Cl",
+                             "Ge", "As", "Se", "Br", "Sb", "Te", "I"}
+            looks_metallic = all(
+                int(f.get("heavy_atom_count", 0)) == 1
+                and not (set(f.get("elem_set", [])) & organic_elems)
+                for f in b_frags
+            )
+            if looks_metallic:
+                b_label = "B (metal centers)"
+        labels = {"A": "A (larger cations)", "B": b_label, "X": "X (ClO\u2084 / halide)"}
         opts = []
         for t in ("B", "A", "X"):
             if t in present:
-                count = sum(1 for f in scene.get("fragment_table") or [] if f.get("type") == t)
+                count = sum(1 for f in fragments if f.get("type") == t)
                 opts.append({"label": f"{labels[t]} \u00d7{count}", "value": t})
         return opts or [{"label": "(no fragments)", "value": "B", "disabled": True}]
 
@@ -309,6 +327,10 @@ class ViewerBackend:
             state["topology_site_index"] = None if value in ("", None) else int(value)
         if "topology_enabled" in patch:
             state["topology_enabled"] = bool(patch["topology_enabled"])
+        if "topology_show_all_sites" in patch:
+            state["topology_show_all_sites"] = bool(patch["topology_show_all_sites"])
+        if "topology_hull_color" in patch and patch["topology_hull_color"]:
+            state["topology_hull_color"] = str(patch["topology_hull_color"])
         if "fast_rendering" in patch:
             state["fast_rendering"] = bool(patch["fast_rendering"])
         if "camera" in patch:
@@ -370,6 +392,8 @@ class ViewerBackend:
         style["display_mode"] = state.get("display_mode", scene.get("display_mode", "formula_unit"))
         style["fast_rendering"] = bool(state.get("fast_rendering", False))
         style["topology_enabled"] = bool(state.get("topology_enabled", True))
+        style["topology_show_all_sites"] = bool(state.get("topology_show_all_sites", False))
+        style["topology_hull_color"] = str(state.get("topology_hull_color", "#7C5CBF"))
         return style
 
     def add_uploaded_bundle(self, contents: str, filename: str) -> LoadedCrystal:
@@ -509,14 +533,55 @@ class ViewerBackend:
         topology_fragment = self.map_display_fragment_to_topology(bundle, display_fragment)
         if topology_fragment is None:
             return None
-        return analyze_topology(
+        cutoff = float(state.get("cutoff", 10.0))
+        primary = analyze_topology(
             bundle,
             center_index=int(topology_fragment["index"]),
-            cutoff=float(state.get("cutoff", 10.0)),
+            cutoff=cutoff,
             display_center=display_fragment.get("center") if display_fragment else None,
             display_label=display_fragment.get("label") if display_fragment else None,
             display_type=display_fragment.get("type") if display_fragment else None,
         )
+        if not state.get("topology_show_all_sites", False):
+            return primary
+        # Gather hull/center for every other fragment of the same display type so
+        # the renderer can tile a "polyhedra packing" view. The selected
+        # ``primary`` site stays special (it owns the histogram + results panel);
+        # the rest land in ``extra_overlays`` and will be drawn at lower opacity.
+        target_type = display_fragment.get("type") if display_fragment else state.get("topology_fragment_type")
+        extras = []
+        primary_display_index = int(display_fragment["index"]) if display_fragment else None
+        for frag in scene.get("fragment_table") or []:
+            if target_type and frag.get("type") != target_type:
+                continue
+            if primary_display_index is not None and int(frag["index"]) == primary_display_index:
+                continue
+            mapped = self.map_display_fragment_to_topology(bundle, frag)
+            if mapped is None:
+                continue
+            try:
+                extra = analyze_topology(
+                    bundle,
+                    center_index=int(mapped["index"]),
+                    cutoff=cutoff,
+                    display_center=frag.get("center"),
+                    display_label=frag.get("label"),
+                    display_type=frag.get("type"),
+                )
+            except Exception:
+                continue
+            extras.append(
+                {
+                    "center_coords": extra.get("center_coords"),
+                    "center_label": extra.get("center_label"),
+                    "shell_coords": extra.get("shell_coords"),
+                    "distances": extra.get("distances"),
+                }
+            )
+        if extras:
+            primary = dict(primary)
+            primary["extra_overlays"] = extras
+        return primary
 
     def figure_for_state(self, state: Optional[dict[str, Any]] = None, click_data: Optional[dict[str, Any]] = None):
         state = self.get_state() if state is None else state
@@ -793,10 +858,31 @@ def create_app(
                         value=first_state["topology_fragment_type"],
                         clearable=False,
                     ),
+                    dcc.Checklist(
+                        id="topology-show-all",
+                        options=[{"label": "Tile every site of selected type (\u591a\u9762\u4f53\u5bc6\u94fa)", "value": "all"}],
+                        value=["all"] if first_state.get("topology_show_all_sites", False) else [],
+                        style={"marginTop": "6px"},
+                    ),
+                    html.Div(
+                        [
+                            html.Label(
+                                "Polyhedron colour",
+                                style={"marginRight": "8px", "fontSize": "13px"},
+                            ),
+                            dcc.Input(
+                                id="topology-hull-color",
+                                type="color",
+                                value=first_state.get("topology_hull_color", "#7C5CBF"),
+                                style={"width": "48px", "height": "28px", "padding": "0", "border": "1px solid #BBB", "verticalAlign": "middle"},
+                            ),
+                        ],
+                        style={"display": "flex", "alignItems": "center", "marginTop": "8px"},
+                    ),
                     dcc.Input(
                         id="topology-site-index",
                         type="number",
-                        placeholder="Site / fragment index",
+                        placeholder="Site / fragment index (blank = first / click in viewer)",
                         value=first_state["topology_site_index"],
                         style={"width": "100%", "marginTop": "8px"},
                     ),
@@ -900,6 +986,8 @@ def create_app(
         Output("topology-fragment-type", "value"),
         Output("topology-site-index", "value"),
         Output("topology-toggle", "value"),
+        Output("topology-show-all", "value"),
+        Output("topology-hull-color", "value"),
         Output("fast-rendering-toggle", "value"),
         Output("agent-state-store", "data"),
         Input("agent-state-poll", "n_intervals"),
@@ -908,7 +996,7 @@ def create_app(
     def sync_agent_state(_):
         state = backend.pop_pending_state()
         if not state:
-            return (no_update,) * 12
+            return (no_update,) * 14
         return (
             state["structure"],
             state["display_mode"],
@@ -920,6 +1008,8 @@ def create_app(
             state["topology_fragment_type"],
             state["topology_site_index"],
             ["enabled"] if state.get("topology_enabled", True) else [],
+            ["all"] if state.get("topology_show_all_sites", False) else [],
+            state.get("topology_hull_color", "#7C5CBF"),
             ["fast"] if state.get("fast_rendering", False) else [],
             state,
         )
@@ -936,6 +1026,8 @@ def create_app(
         Input("topology-fragment-type", "value"),
         Input("topology-site-index", "value"),
         Input("topology-toggle", "value"),
+        Input("topology-show-all", "value"),
+        Input("topology-hull-color", "value"),
         Input("fast-rendering-toggle", "value"),
         Input("crystal-graph", "relayoutData"),
         Input("crystal-graph", "clickData"),
@@ -951,6 +1043,8 @@ def create_app(
         fragment_type,
         site_index,
         topology_toggle,
+        topology_show_all,
+        topology_hull_color,
         fast_rendering_toggle,
         relayout_data,
         click_data,
@@ -981,6 +1075,8 @@ def create_app(
                 "topology_fragment_type": fragment_type,
                 "topology_site_index": resolved_site,
                 "topology_enabled": "enabled" in (topology_toggle or []),
+                "topology_show_all_sites": "all" in (topology_show_all or []),
+                "topology_hull_color": topology_hull_color or "#7C5CBF",
                 "fast_rendering": "fast" in (fast_rendering_toggle or []),
                 "camera": camera,
             }
@@ -1002,6 +1098,8 @@ def create_app(
         Input("topology-fragment-type", "value"),
         Input("topology-site-index", "value"),
         Input("topology-toggle", "value"),
+        Input("topology-show-all", "value"),
+        Input("topology-hull-color", "value"),
         Input("fast-rendering-toggle", "value"),
         Input("crystal-graph", "clickData"),
         Input("agent-state-store", "data"),
@@ -1017,6 +1115,8 @@ def create_app(
         fragment_type,
         site_index,
         topology_toggle,
+        topology_show_all,
+        topology_hull_color,
         fast_rendering_toggle,
         click_data,
         agent_state,
@@ -1034,6 +1134,8 @@ def create_app(
                 "topology_fragment_type": fragment_type,
                 "topology_site_index": None if site_index in ("", None) else int(site_index),
                 "topology_enabled": "enabled" in (topology_toggle or []),
+                "topology_show_all_sites": "all" in (topology_show_all or []),
+                "topology_hull_color": topology_hull_color or "#7C5CBF",
                 "fast_rendering": "fast" in (fast_rendering_toggle or []),
             }
         )
@@ -1065,7 +1167,12 @@ def _build_parser():
     parser.add_argument("--host", default="127.0.0.1", help="Host to bind.")
     parser.add_argument("--port", type=int, default=8051, help="Port to expose.")
     parser.add_argument("--structure", nargs="*", help="Serve only selected catalog structure(s).")
-    parser.add_argument("--cif", nargs="*", help="Optional CIF path(s) to preload.")
+    parser.add_argument(
+        "--cif",
+        action="append",
+        default=[],
+        help="Optional CIF path to preload. Repeat the flag to preload multiple files: --cif a.cif --cif b.cif.",
+    )
     parser.add_argument("--api-only", action="store_true", help="Reserved for automation mode; still serves the same app.")
     return parser
 
