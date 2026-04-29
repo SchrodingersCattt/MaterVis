@@ -209,61 +209,110 @@ def _whole_components_in_box(ops: Any, atoms, M, cell):
 
 
 def _heavy_stoichiometry(atoms_out, idxs) -> tuple:
-    """Multiset of heavy-atom elements in a cluster, as a hashable signature."""
+    """Multiset of heavy-atom elements in a cluster, as a hashable
+    signature. Atoms that belong to the same disorder assembly (the SHELX
+    PART convention encoded as ``_atom_site_disorder_assembly`` /
+    ``_atom_site_disorder_group``) collapse to a single contribution --
+    e.g. PEP's ethylenediammonium cluster contains C1, C1A, C2, C2A
+    where C1 and C1A are alternative positions of the same atom; the
+    "real" molecule has 2 carbons, not 4.
+
+    For atoms that share an assembly tag (e.g. all four C atoms have
+    ``da="B"`` with ``dg`` 1 vs 2) we count each ``(assembly, dg)``
+    bucket *of one element* as a single occupant of that assembly, then
+    take the maximum count across disorder groups inside the assembly.
+    Atoms with no disorder annotation contribute 1 each.
+    """
     counts: dict[str, int] = {}
+    assemblies: dict[tuple[str, str], dict[str, int]] = {}
     for idx in idxs:
-        elem = atoms_out[idx].get("elem", "")
+        atom = atoms_out[idx]
+        elem = atom.get("elem", "")
         if elem == "H" or not elem:
             continue
-        counts[elem] = counts.get(elem, 0) + 1
+        da = (atom.get("da") or ".").strip()
+        dg = (atom.get("dg") or ".").strip()
+        if da in ("", ".", "?"):
+            counts[elem] = counts.get(elem, 0) + 1
+            continue
+        bucket = assemblies.setdefault((elem, da), {})
+        bucket[dg] = bucket.get(dg, 0) + 1
+    for (elem, _da), bucket in assemblies.items():
+        # An assembly with two alternative positions of the same atom
+        # has two ``dg`` keys with the same count; we count the larger
+        # one (or any, since they're equal in practice) to avoid
+        # double-counting.
+        counts[elem] = counts.get(elem, 0) + max(bucket.values())
     return tuple(sorted(counts.items()))
 
 
-def _augment_formula_unit_with_missing_species(ops, atoms_out, sel_idxs, cell):
-    """Ensure the formula unit shows at least one cluster of every distinct
-    heavy stoichiometry present in the structure.
+def _augment_formula_unit_with_missing_species(ops, atoms_out, sel_idxs, cell, raw_atoms):
+    """Rebuild the organic part of the formula unit to be one molecule
+    per chemical species, leaving the anion (Cl-bearing) selection from
+    the legacy pass intact.
 
-    The legacy ``select_formula_unit`` rejects any organic cluster smaller
-    than 35% of its anchor's atom count, which silently drops light cations
-    such as NH4+ when they coexist with bulky cations like DABCO (the DAP-4
-    case). We re-cluster the output, look up which stoichiometries are
-    already represented, and append one cluster of each missing species --
-    picking the cluster whose centroid is closest to the existing selection
-    so the formula unit stays spatially coherent. Pure-anion (Cl-bearing)
-    species are left to legacy because the Cl/anion stoichiometry pass
-    already adds up to four of them.
+    Two failure modes the legacy ``select_formula_unit`` had on the
+    perchlorate-and-amine family:
+
+    * Light cations like NH4+ coexisting with bulky cations like DABCO
+      were dropped because the size-vs-anchor 35% rule discarded them
+      (the DAP-4 case).
+    * In PEP both ethylenediammonium ((C2H10N2)2+) and piperazinium
+      ((C4H12N2)2+) are present, but the disorder-twinned ethylene
+      cation has *more atoms* (the C disorder copies inflate the count)
+      than the cleanly ordered piperazinium. The legacy "pick the two
+      largest organic clusters" rule then chose two copies of the
+      ethylenediammonium and dropped piperazinium entirely, surfacing as
+      the topology UI listing only ``C2N2`` and missing ``C4N2``.
+
+    Strategy: enumerate organic clusters in the post-reassembly
+    ``atoms_out``, group them by disorder-aware heavy stoichiometry
+    (so PEP's two distinct cation species separate cleanly even though
+    their *raw* signatures collide at ``(C4, N2)``), and keep one
+    cluster per species -- the one whose centroid is closest to the
+    legacy anchor centroid so the rebuilt formula unit stays spatially
+    coherent. The legacy anion selection (the four ClO4 groups) is
+    kept verbatim.
     """
     if not sel_idxs:
         return sel_idxs
+
     bond_pairs = ops.find_bonds(atoms_out, cell=cell)
     components = _cluster_components(len(atoms_out), bond_pairs)
 
     sel_set = set(sel_idxs)
-    represented: set[tuple] = set()
-    for comp in components:
-        if any(idx in sel_set for idx in comp):
-            sig = _heavy_stoichiometry(atoms_out, comp)
-            if sig:
-                represented.add(sig)
-
     anchor_centroid = np.mean(
         [np.array(atoms_out[idx]["cart"], dtype=float) for idx in sel_idxs],
         axis=0,
     )
 
-    all_sigs = {_heavy_stoichiometry(atoms_out, comp) for comp in components}
-    augmented = list(sel_idxs)
-    for sig in all_sigs - represented:
+    organics_by_sig: dict[tuple, list] = {}
+    selected = set()
+    for comp in components:
+        sig = _heavy_stoichiometry(atoms_out, comp)
         if not sig:
             continue
         elements = {elem for elem, _ in sig}
         if "Cl" in elements:
+            # Anion clusters: keep the legacy selection verbatim.
+            if any(idx in sel_set for idx in comp):
+                selected.update(comp)
             continue
+        organics_by_sig.setdefault(sig, []).append(comp)
+
+    for sig, comps in organics_by_sig.items():
+        # If the legacy already picked exactly one cluster of this
+        # species, prefer that one so we don't relocate the molecule on
+        # screen for the user. Otherwise pick the cluster closest to the
+        # anchor centroid.
+        legacy_picks = [c for c in comps if any(idx in sel_set for idx in c)]
+        if len(legacy_picks) == 1:
+            selected.update(legacy_picks[0])
+            continue
+        candidates = legacy_picks if legacy_picks else comps
         best_comp = None
         best_dist = float("inf")
-        for comp in components:
-            if _heavy_stoichiometry(atoms_out, comp) != sig:
-                continue
+        for comp in candidates:
             centroid = np.mean(
                 [np.array(atoms_out[idx]["cart"], dtype=float) for idx in comp],
                 axis=0,
@@ -273,8 +322,8 @@ def _augment_formula_unit_with_missing_species(ops, atoms_out, sel_idxs, cell):
                 best_dist = dist
                 best_comp = comp
         if best_comp is not None:
-            augmented.extend(best_comp)
-    return sorted(set(augmented))
+            selected.update(best_comp)
+    return sorted(selected)
 
 
 def _selected_atoms_for_mode(ops: Any, atoms, M, cell, display_mode: str):
@@ -289,7 +338,9 @@ def _selected_atoms_for_mode(ops: Any, atoms, M, cell, display_mode: str):
         # are detected directly from the stored Cartesian coordinates.
         return [dict(atom) for atom in atoms]
     atoms_out, sel_idxs = ops.select_formula_unit(atoms, M, cell)
-    sel_idxs = _augment_formula_unit_with_missing_species(ops, atoms_out, sel_idxs, cell)
+    sel_idxs = _augment_formula_unit_with_missing_species(
+        ops, atoms_out, sel_idxs, cell, raw_atoms=atoms
+    )
     return [atoms_out[idx] for idx in sel_idxs]
 
 

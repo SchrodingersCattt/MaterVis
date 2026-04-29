@@ -198,10 +198,24 @@ def _fragment_table_from_atoms(
             continue
         center_cart = np.mean([atom["cart"] for atom in center_atoms], axis=0)
         center_frac = np.mean([atom["frac"] for atom in center_atoms], axis=0)
+        # Disorder-aware heavy-atom counts: atoms that belong to the
+        # same SHELX disorder assembly (e.g. PEP's C1/C1A pair, both
+        # ``da="B"`` with ``dg`` 1 vs 2) collapse to one chemical
+        # carbon, so the displayed formula matches what the molecule
+        # actually contains rather than counting both alternatives.
         elem_counts: dict[str, int] = {}
+        assemblies: dict[tuple[str, str], dict[str, int]] = {}
         for atom in heavy_atoms:
             elem = atom["elem"]
-            elem_counts[elem] = elem_counts.get(elem, 0) + 1
+            da = str(atom.get("da") or ".").strip()
+            dg = str(atom.get("dg") or ".").strip()
+            if da in ("", ".", "?"):
+                elem_counts[elem] = elem_counts.get(elem, 0) + 1
+                continue
+            bucket = assemblies.setdefault((elem, da), {})
+            bucket[dg] = bucket.get(dg, 0) + 1
+        for (elem, _da), bucket in assemblies.items():
+            elem_counts[elem] = elem_counts.get(elem, 0) + max(bucket.values())
         # Hill-ish ordering for the public formula: C, N, then alphabetical.
         # (Pure mineral fragments without C come out alphabetical.) The result
         # is a stable string identifier we can group on across A/B/X labels --

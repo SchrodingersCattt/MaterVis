@@ -277,7 +277,16 @@ def parse_asu(path):
 
     for asu_at in asu_atoms:
         frac0 = asu_at['frac']
-        ops = symops if asu_at['occ'] >= 0.99 else symops[:1]
+        # Always expand by every symmetry operation, regardless of
+        # occupancy. The previous "only the first symop for disordered
+        # atoms" rule meant a partial-occupancy carbon (e.g. PEP's
+        # C8/C8A at 0.5 each) ended up at a single asymmetric-unit
+        # position while its full-occupancy nitrogen neighbour expanded
+        # to all 8 unit-cell sites. The 7 nitrogen images then had no
+        # carbon neighbour anywhere in the structure and surfaced as
+        # bogus lone-N "fragments" in the topology UI. Special-position
+        # overlaps are still handled by the ``seen_cart`` dedup below.
+        ops = symops
         for op in ops:
             frac_new = np.array(op.apply_to_xyz(list(frac0)), dtype=float)
             frac_basic = _wrap_frac01(frac_new)
