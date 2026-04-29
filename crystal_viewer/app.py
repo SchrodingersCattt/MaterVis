@@ -278,6 +278,30 @@ class ViewerBackend:
             for item in self._species_summary(scene.get("fragment_table") or [])
         ]
 
+    def fragment_options(self, state: Optional[dict[str, Any]] = None) -> list[dict[str, Any]]:
+        """Dropdown options for the right-panel "Analyze fragment" selector.
+
+        One entry per fragment in the current scene. The ``value`` is the
+        fragment index (matching what ``topology_site_index`` already
+        used), the ``label`` is the human-readable id + formula. Crucially
+        this list is *not* filtered by the species checkboxes -- the user
+        can tile only ClO4 polyhedra and still ask the right panel to
+        analyse a C6N2 fragment, which is the "decouple display from
+        analysis" UX the user asked for.
+        """
+        state = state or self.get_state()
+        try:
+            scene = self.scene_for_state(state)
+        except Exception:
+            return []
+        options: list[dict[str, Any]] = []
+        for frag in scene.get("fragment_table") or []:
+            label = frag.get("label") or f"#{frag['index']}"
+            formula = frag.get("formula") or frag.get("species") or ""
+            text = f"{label}  \u00b7  {formula}" if formula else str(label)
+            options.append({"label": text, "value": int(frag["index"])})
+        return options
+
     def _drop_placeholder(self) -> None:
         if PLACEHOLDER_STRUCTURE in self.structure_names and len(self.structure_names) == 1:
             self.structure_names = []
@@ -542,14 +566,23 @@ class ViewerBackend:
         species_keys: Optional[list[str]],
         click_data: Optional[dict[str, Any]],
     ) -> Optional[int]:
+        """Resolve which fragment index gets the right-panel histogram +
+        topology results.
+
+        Display (which species the polyhedra overlay tiles) and analysis
+        (which single fragment is in the right panel) are independent:
+        an ``explicit_site`` from the "Analyze fragment" dropdown wins
+        unconditionally, even when its formula is not in the currently
+        tiled ``species_keys`` set. Only when no explicit site was given
+        do we fall through to the click target / first-match defaults
+        scoped by the tiled species.
+        """
         scene = self.scene_for_state(state)
         fragments = scene.get("fragment_table", [])
         species_set = {str(key) for key in species_keys or [] if key}
         if explicit_site is not None:
             chosen = self._display_fragment(scene, explicit_site)
-            if chosen is not None and (
-                not species_set or (chosen.get("formula") or chosen.get("species")) in species_set
-            ):
+            if chosen is not None:
                 return int(explicit_site)
         if click_data and click_data.get("points"):
             point = click_data["points"][0]
@@ -971,13 +1004,6 @@ def create_app(
                         ],
                         style={"display": "flex", "alignItems": "center", "marginTop": "8px"},
                     ),
-                    dcc.Input(
-                        id="topology-site-index",
-                        type="number",
-                        placeholder="Primary site index (blank = first match / click in viewer)",
-                        value=first_state["topology_site_index"],
-                        style={"width": "100%", "marginTop": "8px"},
-                    ),
                     html.Div(style={"height": "12px"}),
                     html.Button("Save Preset", id="save-preset-btn", n_clicks=0),
                     html.Button("Export Static Figure", id="export-btn", n_clicks=0, style={"marginLeft": "8px"}),
@@ -1010,6 +1036,25 @@ def create_app(
             html.Div(
                 [
                     html.H4("Topology Analysis"),
+                    html.Label(
+                        "Analyze fragment",
+                        htmlFor="topology-site-index",
+                        style={"fontSize": "13px", "fontWeight": "bold", "display": "block"},
+                    ),
+                    dcc.Dropdown(
+                        id="topology-site-index",
+                        options=backend.fragment_options(first_state),
+                        value=first_state.get("topology_site_index"),
+                        placeholder="(first match of selected species, or click in viewer)",
+                        clearable=True,
+                        style={"marginTop": "4px", "marginBottom": "8px"},
+                    ),
+                    html.Div(
+                        "Display tiling (left panel) and analysis (this panel) "
+                        "are independent: switch the analysed fragment here without "
+                        "changing what is drawn.",
+                        style={"fontSize": "11px", "color": "#666", "marginBottom": "8px"},
+                    ),
                     dcc.Graph(id="topology-histogram", figure=topology_histogram_figure(first_topology), style={"height": "280px"}),
                     html.Pre(
                         id="topology-results",
@@ -1068,6 +1113,67 @@ def create_app(
             # rather than leaving the checkbox group empty.
             default = backend.default_state(structure).get("topology_species_keys") or []
             keep = list(default)
+        return opts, keep
+
+    @app.callback(
+        Output("topology-site-index", "value", allow_duplicate=True),
+        Input("crystal-graph", "clickData"),
+        State("structure-selector", "value"),
+        State("display-mode-selector", "value"),
+        State("display-options", "value"),
+        prevent_initial_call=True,
+    )
+    def click_to_select_fragment(click_data, structure, display_mode, display_options):
+        if not click_data or not click_data.get("points"):
+            return no_update
+        try:
+            state = backend.normalize_state(
+                {
+                    "structure": structure,
+                    "display_mode": display_mode,
+                    "display_options": display_options,
+                }
+            )
+            resolved = backend.resolve_topology_site(
+                state=state,
+                structure=structure,
+                explicit_site=None,
+                species_keys=None,
+                click_data=click_data,
+            )
+        except Exception:
+            return no_update
+        return resolved if resolved is not None else no_update
+
+    @app.callback(
+        Output("topology-site-index", "options"),
+        Output("topology-site-index", "value", allow_duplicate=True),
+        Input("structure-selector", "value"),
+        Input("display-mode-selector", "value"),
+        Input("display-options", "value"),
+        State("topology-site-index", "value"),
+        prevent_initial_call=True,
+    )
+    def refresh_fragment_options(structure, display_mode, display_options, current_value):
+        # The fragment options reflect the *scene* fragments, so they
+        # change when the user switches structures, display modes
+        # (formula unit / unit cell / cluster), or toggles hydrogens.
+        # When the previously analysed fragment falls outside the new
+        # scene we clear the dropdown so the topology callback falls
+        # back to the "first match of selected species" default.
+        try:
+            state = backend.normalize_state(
+                {
+                    "structure": structure,
+                    "display_mode": display_mode,
+                    "display_options": display_options,
+                }
+            )
+        except Exception:
+            return no_update, no_update
+        opts = backend.fragment_options(state)
+        valid_values = {opt["value"] for opt in opts}
+        keep = current_value if current_value in valid_values else None
         return opts, keep
 
     @app.callback(
