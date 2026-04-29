@@ -589,9 +589,31 @@ class ViewerBackend:
         )
         if site_index is None:
             return None
+        # Memoize the (heavy) topology dict on the bundle keyed on the
+        # state fields that actually influence it. Cosmetic toggles
+        # (Labels, Axes, Hydrogens, atom-scale, ...) don't touch this
+        # cache, so on the warm path the trace caches we attach to the
+        # topology_data dict (background hull / edges / shell highlights)
+        # also stay alive instead of being thrown away on every
+        # checkbox flick.
+        cache_key = (
+            structure,
+            state.get("display_mode"),
+            bool("hydrogens" in (state.get("display_options") or [])),
+            tuple(sorted(str(k) for k in species_keys)),
+            int(site_index),
+            float(state.get("cutoff", 10.0)),
+        )
+        cache = getattr(bundle, "_topology_state_cache", None)
+        if cache is None:
+            cache = {}
+            bundle._topology_state_cache = cache
+        if cache_key in cache:
+            return cache[cache_key]
         display_fragment = self._display_fragment(scene, site_index)
         topology_fragment = self.map_display_fragment_to_topology(bundle, display_fragment)
         if topology_fragment is None:
+            cache[cache_key] = None
             return None
         cutoff = float(state.get("cutoff", 10.0))
         primary = analyze_topology(
@@ -647,6 +669,7 @@ class ViewerBackend:
         if extras:
             primary = dict(primary)
             primary["extra_overlays"] = extras
+        cache[cache_key] = primary
         return primary
 
     def figure_for_state(self, state: Optional[dict[str, Any]] = None, click_data: Optional[dict[str, Any]] = None):
@@ -732,6 +755,9 @@ class ViewerBackend:
         self.preset_path = path
         for bundle in self.bundles.values():
             bundle.scene_cache.clear()
+            cache = getattr(bundle, "_topology_state_cache", None)
+            if cache:
+                cache.clear()
         structure = self.get_state()["structure"]
         self.patch_state(self.default_state(structure))
         return {"path": path, "state": self.get_state()}

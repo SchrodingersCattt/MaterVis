@@ -358,10 +358,19 @@ def _bond_mesh_traces(scene: dict, style: dict):
 
 
 def _atom_mesh_traces(scene: dict, style: dict):
-    # Tessellation kept low (lat=6, lon=10 -> 60 verts/atom) -- denser
-    # spheres roughly triple the Mesh3d trace cost and Plotly's per-trace
-    # data validation is the dominant cost when the user toggles a checkbox
-    # on a structure with a few dozen atoms.
+    # Per-atom tessellation budget. For typical structures (<=200 atoms)
+    # we use lat=6 / lon=10 (62 verts) -- spheres look smooth at any
+    # reasonable zoom. For PEP-sized unit cells (~700 atoms) we drop to
+    # lat=4 / lon=8 (26 verts), which is invisible at the camera
+    # distance the dense scene forces but cuts the Plotly array-codec
+    # cost by ~2.4x and keeps warm-rebuild latency under a second.
+    n_atoms = len(scene.get("draw_atoms", []))
+    if n_atoms > 400:
+        lat_steps, lon_steps = 4, 8
+    elif n_atoms > 200:
+        lat_steps, lon_steps = 5, 9
+    else:
+        lat_steps, lon_steps = 6, 10
     groups: Dict[Tuple[str, bool], dict] = {}
     for atom in scene["draw_atoms"]:
         if style.get("show_minor_only", False) and not atom["is_minor"]:
@@ -371,7 +380,7 @@ def _atom_mesh_traces(scene: dict, style: dict):
         radius = float(atom["atom_radius"]) * float(style["atom_scale"])
         if atom["is_minor"]:
             radius *= 1.12
-        vertices, triangles = _sphere_mesh(atom["cart"], radius, lat_steps=6, lon_steps=10)
+        vertices, triangles = _sphere_mesh(atom["cart"], radius, lat_steps=lat_steps, lon_steps=lon_steps)
         _append_mesh(groups[key], vertices, triangles)
 
     traces = []
@@ -467,65 +476,84 @@ def _atom_scatter_traces(scene: dict, style: dict):
 def _minor_bond_wireframe_traces(scene: dict, style: dict):
     if not style.get("minor_wireframe", False):
         return []
-    xs, ys, zs = [], [], []
+    segments = []
     for bond in scene["bonds"]:
         if not bond["is_minor"]:
             continue
-        start = np.array(bond["start"], dtype=float)
-        end = np.array(bond["end"], dtype=float)
-        xs.extend([float(start[0]), float(end[0]), None])
-        ys.extend([float(start[1]), float(end[1]), None])
-        zs.extend([float(start[2]), float(end[2]), None])
-    if not xs:
+        segments.append((np.array(bond["start"], dtype=float), np.array(bond["end"], dtype=float)))
+    if not segments:
         return []
-    base_width = max(3.0, 22.0 * float(style["bond_radius"]))
-    return [
-        go.Scatter3d(
-            x=xs,
-            y=ys,
-            z=zs,
-            mode="lines",
-            line=dict(color="#202020", width=base_width),
-            opacity=0.9,
-            hoverinfo="skip",
-            showlegend=False,
-        )
-    ]
+    radius = max(0.015, 0.55 * float(style["bond_radius"]))
+    trace = _segment_cylinder_trace(
+        segments,
+        radius=radius,
+        color="#202020",
+        opacity=0.9,
+        sides=4,
+        name="minor-bond-wireframe",
+    )
+    return [trace] if trace is not None else []
+
+
+def _ring_segments(center: np.ndarray, radius: float, axis: np.ndarray, *, segments: int = 14):
+    """Generate (start, end) line segments forming a circular ring of
+    ``radius`` around ``center`` lying in the plane perpendicular to
+    ``axis``. Used by the disorder-outline wireframe so the rings are
+    real 3-D geometry that scales with the camera."""
+    axis = np.asarray(axis, dtype=float)
+    axis = axis / max(np.linalg.norm(axis), 1e-9)
+    ref = np.array([1.0, 0.0, 0.0]) if abs(axis[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+    u = np.cross(axis, ref)
+    u = u / max(np.linalg.norm(u), 1e-9)
+    v = np.cross(axis, u)
+    pts = []
+    for k in range(segments):
+        theta = 2.0 * np.pi * k / segments
+        pts.append(center + radius * (np.cos(theta) * u + np.sin(theta) * v))
+    out = []
+    for k in range(segments):
+        out.append((pts[k], pts[(k + 1) % segments]))
+    return out
 
 
 def _minor_outline_traces(scene: dict, style: dict):
-    payload = {"x": [], "y": [], "z": [], "size": []}
+    """Wireframe sphere around each minor / disorder atom, built from
+    three perpendicular rings of Mesh3d cylinders. Replaces the old
+    ``Scatter3d(mode="markers", line=dict(width=...))`` rings whose
+    pixel-fixed width meant the disorder outlines stayed the same
+    screen size when the camera dollied out -- and ate the atoms whole
+    once the structure shrank."""
+    minors = []
     for atom in scene["draw_atoms"]:
         if not atom["is_minor"]:
             continue
         if style.get("show_minor_only", False) and not atom["is_minor"]:
             continue
-        base_size = max(10.0, 95.0 * atom["atom_radius"] * float(style["atom_scale"]))
         ring_scale = 1.34 if style.get("minor_wireframe", False) else 1.20
-        payload["x"].append(float(atom["cart"][0]))
-        payload["y"].append(float(atom["cart"][1]))
-        payload["z"].append(float(atom["cart"][2]))
-        payload["size"].append(base_size * ring_scale)
-    if not payload["x"]:
+        radius = float(atom["atom_radius"]) * float(style["atom_scale"]) * ring_scale
+        minors.append((np.asarray(atom["cart"], dtype=float), radius))
+    if not minors:
         return []
-    line_color = "#111111" if style.get("minor_wireframe", False) else "#555555"
-    line_width = 7.0 if style.get("minor_wireframe", False) else 4.5
-    return [
-        go.Scatter3d(
-            x=payload["x"],
-            y=payload["y"],
-            z=payload["z"],
-            mode="markers",
-            marker=dict(
-                size=payload["size"],
-                color="rgba(255,255,255,0.0)",
-                opacity=1.0,
-                line=dict(color=line_color, width=line_width),
-            ),
-            hoverinfo="skip",
-            showlegend=False,
-        )
+    color = "#111111" if style.get("minor_wireframe", False) else "#555555"
+    cylinder_radius = 0.022 if style.get("minor_wireframe", False) else 0.014
+    segments: list[tuple[np.ndarray, np.ndarray]] = []
+    axes = [
+        np.array([1.0, 0.0, 0.0]),
+        np.array([0.0, 1.0, 0.0]),
+        np.array([0.0, 0.0, 1.0]),
     ]
+    for center, radius in minors:
+        for axis in axes:
+            segments.extend(_ring_segments(center, radius, axis, segments=14))
+    trace = _segment_cylinder_trace(
+        segments,
+        radius=cylinder_radius,
+        color=color,
+        opacity=0.95,
+        sides=4,
+        name="minor-outline",
+    )
+    return [trace] if trace is not None else []
 
 
 def _highlight_traces(scene: dict, style: dict):
@@ -1057,41 +1085,145 @@ def shell_atom_traces(shell_coords, distances, color="#7C5CBF"):
     ]
 
 
+def _merged_hull_mesh(overlays: list[tuple[list, float]], color: str):
+    """Pack any number of (shell_coords, opacity) overlays into the
+    minimum number of Mesh3d traces -- one per distinct opacity value.
+    With 40+ tiled polyhedra each contributing its own ConvexHull this
+    drops the Plotly trace count by ~2x while keeping the same on-
+    screen look (semi-transparent hulls layered front-to-back)."""
+    try:
+        from scipy.spatial import ConvexHull
+    except Exception:  # pragma: no cover - optional dep
+        return []
+    bins: dict[float, dict] = {}
+    for coords, opacity in overlays:
+        coords = np.asarray(coords, dtype=float)
+        if len(coords) < 4:
+            continue
+        try:
+            hull = ConvexHull(coords)
+        except Exception:
+            continue
+        bin_payload = bins.setdefault(round(float(opacity), 4), {"x": [], "y": [], "z": [], "i": [], "j": [], "k": []})
+        base = len(bin_payload["x"])
+        bin_payload["x"].extend(coords[:, 0].tolist())
+        bin_payload["y"].extend(coords[:, 1].tolist())
+        bin_payload["z"].extend(coords[:, 2].tolist())
+        bin_payload["i"].extend((hull.simplices[:, 0] + base).tolist())
+        bin_payload["j"].extend((hull.simplices[:, 1] + base).tolist())
+        bin_payload["k"].extend((hull.simplices[:, 2] + base).tolist())
+    traces = []
+    for opacity, payload in bins.items():
+        if not payload["x"]:
+            continue
+        traces.append(
+            go.Mesh3d(
+                x=payload["x"],
+                y=payload["y"],
+                z=payload["z"],
+                i=payload["i"],
+                j=payload["j"],
+                k=payload["k"],
+                color=color,
+                opacity=float(opacity),
+                flatshading=True,
+                hoverinfo="skip",
+                showlegend=False,
+                name="coordination-hull",
+            )
+        )
+    return traces
+
+
+def _merged_hull_edges(overlays: list[list], color: str):
+    """One Mesh3d cylinder bundle for every polyhedron edge in the
+    scene. Takes a list of shell-coord arrays and emits a single
+    trace -- ~50x fewer Plotly traces than the per-overlay path when
+    many polyhedra are tiled."""
+    try:
+        from scipy.spatial import ConvexHull
+    except Exception:  # pragma: no cover - optional dep
+        return []
+    all_segments: list[tuple[np.ndarray, np.ndarray]] = []
+    lengths: list[float] = []
+    for coords in overlays:
+        coords = np.asarray(coords, dtype=float)
+        if len(coords) < 4:
+            continue
+        try:
+            hull = ConvexHull(coords)
+        except Exception:
+            continue
+        edges: set[tuple[int, int]] = set()
+        for simplex in hull.simplices:
+            a, b, c = simplex
+            edges.add(tuple(sorted((int(a), int(b)))))
+            edges.add(tuple(sorted((int(b), int(c)))))
+            edges.add(tuple(sorted((int(a), int(c)))))
+        for i, j in edges:
+            p0 = coords[i]
+            p1 = coords[j]
+            all_segments.append((p0, p1))
+            lengths.append(float(np.linalg.norm(p1 - p0)))
+    if not all_segments:
+        return []
+    typical = float(np.median(lengths)) if lengths else 1.0
+    radius = max(0.025, min(0.085, 0.025 * typical))
+    trace = _segment_cylinder_trace(
+        all_segments,
+        radius=radius,
+        color=color,
+        opacity=0.95,
+        sides=5,
+        name="coordination-edges",
+    )
+    return [trace] if trace is not None else []
+
+
 def topology_background_traces(topology_data: dict | None, style: dict | None = None):
     """Hull mesh + edges for every overlay. Designed to be added to the
     figure *before* the atom traces so atoms (especially faded minor /
     disorder positions) stay visible on top of the semi-transparent hull
     instead of getting washed out by Plotly's painter-order alpha
-    stacking."""
+    stacking. Result is cached on the ``topology_data`` dict keyed on
+    ``hull_color`` so toggling a cosmetic checkbox doesn't re-tessellate
+    several thousand hull-edge cylinders for tiled polyhedra."""
     if not topology_data:
         return []
     style = style or {}
     hull_color = str(style.get("topology_hull_color", "#7C5CBF"))
+    cache = topology_data.setdefault("_background_dict_cache", {})
+    if hull_color in cache:
+        return cache[hull_color]
     primary_opacity = 0.22
     extra_opacity = 0.12
 
-    traces = []
-    for overlay, opacity in (
-        (topology_data, primary_opacity),
-        *(((extra, extra_opacity) for extra in topology_data.get("extra_overlays") or [])),
-    ):
-        coords = overlay.get("shell_coords") or []
-        hull = hull_mesh_trace(coords, color=hull_color, opacity=opacity)
-        if hull is not None:
-            traces.append(hull)
-        traces.extend(hull_edge_traces(coords, color=hull_color))
-    return traces
+    overlays_with_opacity: list[tuple[list, float]] = []
+    if topology_data.get("shell_coords"):
+        overlays_with_opacity.append((topology_data["shell_coords"], primary_opacity))
+    for extra in topology_data.get("extra_overlays") or []:
+        if extra.get("shell_coords"):
+            overlays_with_opacity.append((extra["shell_coords"], extra_opacity))
+
+    traces = list(_merged_hull_mesh(overlays_with_opacity, color=hull_color))
+    traces.extend(_merged_hull_edges([c for c, _ in overlays_with_opacity], color=hull_color))
+    cache[hull_color] = [tr.to_plotly_json() if not isinstance(tr, dict) else tr for tr in traces]
+    return cache[hull_color]
 
 
 def topology_foreground_traces(topology_data: dict | None, style: dict | None = None):
     """Center markers, connecting lines and shell-atom highlights for the
     primary overlay plus a faint dot per extra overlay. These belong on
     top of the atom traces so the user can always see which site owns
-    the histogram / results panel."""
+    the histogram / results panel. Cached on ``topology_data`` keyed on
+    ``hull_color``."""
     if not topology_data:
         return []
     style = style or {}
     hull_color = str(style.get("topology_hull_color", "#7C5CBF"))
+    cache = topology_data.setdefault("_foreground_dict_cache", {})
+    if hull_color in cache:
+        return cache[hull_color]
 
     traces: list = []
     primary_center = topology_data.get("center_coords")
@@ -1124,7 +1256,8 @@ def topology_foreground_traces(topology_data: dict | None, style: dict | None = 
         )
         if extra_marker is not None:
             traces.append(extra_marker)
-    return traces
+    cache[hull_color] = [tr.to_plotly_json() if not isinstance(tr, dict) else tr for tr in traces]
+    return cache[hull_color]
 
 
 def topology_traces(topology_data: dict | None, style: dict | None = None):
@@ -1287,10 +1420,13 @@ def build_figure(scene: dict, style: dict, topology_data: dict | None = None) ->
     xr, yr, zr = _scene_ranges(scene, style, topology_data=topology_data if style.get("topology_enabled", True) else None)
     # Mesh3d atoms are 3D world-coordinate spheres -- they grow when the
     # camera dollies in, which is what users expect from "zoom". Scatter3d
-    # markers are pixel-fixed and break that expectation, so we only fall
-    # back to the fast path for very dense scenes (or when the user
-    # explicitly opts in via the toggle).
-    use_fast = bool(style.get("fast_rendering", False)) or len(scene.get("draw_atoms", [])) > 600
+    # markers are pixel-fixed and break that expectation (the user reported
+    # that toggling Hydrogens on PEP unit-cell suddenly produced "flat"
+    # atoms because the threshold tripped). With the per-scene mesh cache
+    # in place even ~700-atom scenes stay responsive on the warm path,
+    # so the threshold is now ~3x looser. The explicit "Fast rendering
+    # fallback" checkbox remains the user-controlled escape hatch.
+    use_fast = bool(style.get("fast_rendering", False)) or len(scene.get("draw_atoms", [])) > 2000
 
     mesh_payload = _cached_atom_bond_meshes(scene, style, use_fast=use_fast)
     topology_on = bool(style.get("topology_enabled", True)) and topology_data is not None
