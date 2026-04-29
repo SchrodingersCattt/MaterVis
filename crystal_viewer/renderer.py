@@ -942,6 +942,33 @@ def shell_center_lines(center, shell_coords):
     ]
 
 
+def _world_sphere_marker_trace(centers, *, radius, color, opacity=0.9):
+    """Mesh3d-based "marker" sphere set. Unlike Scatter3d markers, the
+    radius is in world (Å) coordinates so the on-screen size grows when
+    the camera dollies in -- i.e. the markers actually feel like part of
+    the scene instead of pixel-fixed overlays."""
+    centers = np.array(centers, dtype=float).reshape(-1, 3)
+    if len(centers) == 0:
+        return None
+    payload = {"x": [], "y": [], "z": [], "i": [], "j": [], "k": []}
+    for center in centers:
+        vertices, triangles = _sphere_mesh(center, float(radius), lat_steps=8, lon_steps=12)
+        _append_mesh(payload, vertices, triangles)
+    return go.Mesh3d(
+        x=payload["x"],
+        y=payload["y"],
+        z=payload["z"],
+        i=payload["i"],
+        j=payload["j"],
+        k=payload["k"],
+        color=color,
+        opacity=opacity,
+        hoverinfo="skip",
+        showlegend=False,
+        flatshading=False,
+    )
+
+
 def shell_atom_traces(shell_coords, distances, color="#7C5CBF"):
     coords = np.array(shell_coords, dtype=float)
     if len(coords) == 0:
@@ -949,23 +976,37 @@ def shell_atom_traces(shell_coords, distances, color="#7C5CBF"):
     dists = np.array(distances, dtype=float)
     if len(dists) == 0:
         dists = np.ones(len(coords))
-    size = 12.0 + (dists.max() - dists + 0.1) * 5.0
+    # World-coord sphere radius (Å). Closer neighbours render slightly
+    # larger -- same intent as the old pixel-based marker, but the size
+    # now scales with zoom because it lives in 3-D space.
+    radii = 0.22 + (dists.max() - dists + 0.05) * 0.05
+    payload = {"x": [], "y": [], "z": [], "i": [], "j": [], "k": []}
+    for pos, r in zip(coords, radii):
+        vertices, triangles = _sphere_mesh(pos, float(r), lat_steps=8, lon_steps=12)
+        _append_mesh(payload, vertices, triangles)
     return [
-        go.Scatter3d(
-            x=coords[:, 0],
-            y=coords[:, 1],
-            z=coords[:, 2],
-            mode="markers",
-            marker=dict(size=size.tolist(), color=color, opacity=0.9, line=dict(color="#FFFFFF", width=1.5)),
-            hovertemplate="d=%{text:.3f} Å<extra></extra>",
-            text=dists.tolist(),
+        go.Mesh3d(
+            x=payload["x"],
+            y=payload["y"],
+            z=payload["z"],
+            i=payload["i"],
+            j=payload["j"],
+            k=payload["k"],
+            color=color,
+            opacity=0.9,
+            hoverinfo="skip",
             showlegend=False,
-            name="coordination-shell",
+            flatshading=False,
         )
     ]
 
 
-def topology_traces(topology_data: dict | None, style: dict | None = None):
+def topology_background_traces(topology_data: dict | None, style: dict | None = None):
+    """Hull mesh + edges for every overlay. Designed to be added to the
+    figure *before* the atom traces so atoms (especially faded minor /
+    disorder positions) stay visible on top of the semi-transparent hull
+    instead of getting washed out by Plotly's painter-order alpha
+    stacking."""
     if not topology_data:
         return []
     style = style or {}
@@ -974,63 +1015,71 @@ def topology_traces(topology_data: dict | None, style: dict | None = None):
     extra_opacity = 0.12
 
     traces = []
-
-    def _add_overlay(coords, center, *, opacity, edge_color, draw_marker, label, distances=None):
-        if coords is None:
-            coords = []
+    for overlay, opacity in (
+        (topology_data, primary_opacity),
+        *(((extra, extra_opacity) for extra in topology_data.get("extra_overlays") or [])),
+    ):
+        coords = overlay.get("shell_coords") or []
         hull = hull_mesh_trace(coords, color=hull_color, opacity=opacity)
         if hull is not None:
             traces.append(hull)
-        traces.extend(hull_edge_traces(coords, color=edge_color))
-        if center is not None and len(coords) > 0:
-            # connecting lines only for the primary overlay; extras would clutter
-            if draw_marker:
-                traces.extend(shell_center_lines(center, coords))
-                traces.append(
-                    go.Scatter3d(
-                        x=[float(center[0])],
-                        y=[float(center[1])],
-                        z=[float(center[2])],
-                        mode="markers",
-                        marker=dict(size=14, color="#E07C24", opacity=0.95, line=dict(color="#FFFFFF", width=1.5)),
-                        hovertemplate=f"{label}<extra></extra>",
-                        showlegend=False,
-                    )
-                )
-            else:
-                traces.append(
-                    go.Scatter3d(
-                        x=[float(center[0])],
-                        y=[float(center[1])],
-                        z=[float(center[2])],
-                        mode="markers",
-                        marker=dict(size=8, color=hull_color, opacity=0.55, line=dict(color="#FFFFFF", width=1.0)),
-                        hovertemplate=f"{label}<extra></extra>",
-                        showlegend=False,
-                    )
-                )
-        if draw_marker and distances:
-            traces.extend(shell_atom_traces(coords, distances, color=hull_color))
-
-    _add_overlay(
-        topology_data.get("shell_coords") or [],
-        topology_data.get("center_coords"),
-        opacity=primary_opacity,
-        edge_color=hull_color,
-        draw_marker=True,
-        label=topology_data.get("center_label", "center"),
-        distances=topology_data.get("distances") or [],
-    )
-    for extra in topology_data.get("extra_overlays") or []:
-        _add_overlay(
-            extra.get("shell_coords") or [],
-            extra.get("center_coords"),
-            opacity=extra_opacity,
-            edge_color=hull_color,
-            draw_marker=False,
-            label=extra.get("center_label", "center"),
-        )
+        traces.extend(hull_edge_traces(coords, color=hull_color))
     return traces
+
+
+def topology_foreground_traces(topology_data: dict | None, style: dict | None = None):
+    """Center markers, connecting lines and shell-atom highlights for the
+    primary overlay plus a faint dot per extra overlay. These belong on
+    top of the atom traces so the user can always see which site owns
+    the histogram / results panel."""
+    if not topology_data:
+        return []
+    style = style or {}
+    hull_color = str(style.get("topology_hull_color", "#7C5CBF"))
+
+    traces: list = []
+    primary_center = topology_data.get("center_coords")
+    primary_coords = topology_data.get("shell_coords") or []
+    if primary_center is not None and len(primary_coords) > 0:
+        traces.extend(shell_center_lines(primary_center, primary_coords))
+        primary_marker = _world_sphere_marker_trace(
+            [primary_center],
+            radius=0.55,
+            color="#E07C24",
+            opacity=0.95,
+        )
+        if primary_marker is not None:
+            traces.append(primary_marker)
+        if topology_data.get("distances"):
+            traces.extend(shell_atom_traces(primary_coords, topology_data["distances"], color=hull_color))
+    extra_centers = []
+    for extra in topology_data.get("extra_overlays") or []:
+        center = extra.get("center_coords")
+        coords = extra.get("shell_coords") or []
+        if center is None or len(coords) == 0:
+            continue
+        extra_centers.append(center)
+    if extra_centers:
+        extra_marker = _world_sphere_marker_trace(
+            extra_centers,
+            radius=0.32,
+            color=hull_color,
+            opacity=0.55,
+        )
+        if extra_marker is not None:
+            traces.append(extra_marker)
+    return traces
+
+
+def topology_traces(topology_data: dict | None, style: dict | None = None):
+    """Backwards-compatible wrapper -- background hull then foreground
+    markers in a single trace list. Prefer the split helpers in
+    ``build_figure`` so the painter order interleaves correctly with
+    the atom mesh."""
+    return [
+        *topology_background_traces(topology_data, style),
+        *topology_foreground_traces(topology_data, style),
+    ]
 
 
 def topology_histogram_figure(topology_data: dict | None) -> go.Figure:
@@ -1129,11 +1178,20 @@ def topology_results_markdown(topology_data: dict | None) -> str:
 def build_figure(scene: dict, style: dict, topology_data: dict | None = None) -> go.Figure:
     fig = go.Figure()
     xr, yr, zr = _scene_ranges(scene, style, topology_data=topology_data if style.get("topology_enabled", True) else None)
-    use_fast = bool(style.get("fast_rendering", False)) or len(scene.get("draw_atoms", [])) > 200
+    # Mesh3d atoms are 3D world-coordinate spheres -- they grow when the
+    # camera dollies in, which is what users expect from "zoom". Scatter3d
+    # markers are pixel-fixed and break that expectation, so we only fall
+    # back to the fast path for very dense scenes (or when the user
+    # explicitly opts in via the toggle).
+    use_fast = bool(style.get("fast_rendering", False)) or len(scene.get("draw_atoms", [])) > 600
 
     bond_traces = _bond_scatter_traces(scene, style) if use_fast else _bond_mesh_traces(scene, style)
     atom_traces = _atom_scatter_traces(scene, style) if use_fast else _atom_mesh_traces(scene, style)
 
+    topology_on = bool(style.get("topology_enabled", True)) and topology_data is not None
+    if topology_on:
+        for trace in topology_background_traces(topology_data, style):
+            fig.add_trace(trace)
     for trace in bond_traces:
         fig.add_trace(trace)
     for trace in _minor_bond_wireframe_traces(scene, style):
@@ -1150,8 +1208,8 @@ def build_figure(scene: dict, style: dict, topology_data: dict | None = None) ->
         fig.add_trace(trace)
     for trace in _unit_cell_traces(scene, style):
         fig.add_trace(trace)
-    if style.get("topology_enabled", True):
-        for trace in topology_traces(topology_data, style):
+    if topology_on:
+        for trace in topology_foreground_traces(topology_data, style):
             fig.add_trace(trace)
     fig.add_trace(_atom_selection_trace(scene, style))
 

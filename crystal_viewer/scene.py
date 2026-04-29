@@ -322,7 +322,11 @@ def build_scene_from_atoms(
     style = deep_merge(DEFAULT_STYLE, preset.get("style"))
     entry = preset.get("structures", {}).get(name, {})
     style = deep_merge(style, entry.get("style"))
-    show_h = bool(entry.get("show_hydrogen", style.get("show_hydrogen", show_hydrogen)))
+    # Explicit caller intent (UI checkbox / build_bundle_scene kwarg) wins.
+    # The preset-level toggles only matter when the caller hasn't already
+    # asked for hydrogens, so a freshly-loaded scene with a default-off
+    # preset still honours a user click on the "Hydrogens" checkbox.
+    show_h = bool(show_hydrogen) or bool(entry.get("show_hydrogen", style.get("show_hydrogen", False)))
 
     sel_atoms = _selected_atoms_for_mode(ops, atoms, M, cell, display_mode=display_mode)
     draw_atoms = [dict(atom) for atom in sel_atoms if show_h or atom["elem"] != "H"]
