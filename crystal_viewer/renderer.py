@@ -628,32 +628,40 @@ def _axis_traces(scene: dict, style: dict):
     labels = style.get("axes_labels") or ["a", "b", "c"]
     labels = list(labels) + ["", "", ""]  # pad defensively
 
-    traces = []
+    # Match thickness to the legend size so the axis shafts stay
+    # proportional to the structure they annotate, regardless of zoom.
+    shaft_radius = max(0.025, 0.012 * scale)
+
+    segments: list[tuple[np.ndarray, np.ndarray]] = []
+    label_positions: list[tuple[np.ndarray, str]] = []
     for vec, label in zip(
         [scene["M"][:, 0], scene["M"][:, 1], scene["M"][:, 2]],
         labels[:3],
     ):
         v = _normalize(vec, [1.0, 0.0, 0.0])
         end = origin + v * scale
+        segments.append((origin, end))
+        label_positions.append((end, label))
+
+    traces: list = []
+    shaft = _segment_cylinder_trace(
+        segments,
+        radius=shaft_radius,
+        color=color,
+        opacity=opacity,
+        sides=5,
+        name="axes-shafts",
+    )
+    if shaft is not None:
+        traces.append(shaft)
+    if label_positions:
         traces.append(
             go.Scatter3d(
-                x=[float(origin[0]), float(end[0])],
-                y=[float(origin[1]), float(end[1])],
-                z=[float(origin[2]), float(end[2])],
-                mode="lines",
-                line=dict(color=color, width=5),
-                opacity=opacity,
-                hoverinfo="skip",
-                showlegend=False,
-            )
-        )
-        traces.append(
-            go.Scatter3d(
-                x=[float(end[0])],
-                y=[float(end[1])],
-                z=[float(end[2])],
+                x=[float(p[0]) for p, _ in label_positions],
+                y=[float(p[1]) for p, _ in label_positions],
+                z=[float(p[2]) for p, _ in label_positions],
                 mode="text",
-                text=[label],
+                text=[lab for _, lab in label_positions],
                 textfont=dict(size=12, color=color),
                 hoverinfo="skip",
                 showlegend=False,
@@ -812,6 +820,62 @@ def axis_key_annotations(scene: dict, style: dict) -> list[dict]:
     return annotations
 
 
+def _segment_cylinder_trace(segments, *, radius: float, color: str, opacity: float = 0.95, sides: int = 5, name: str | None = None):
+    """Materialise a list of (start, end) line segments as a single
+    Mesh3d cylinder bundle. Unlike a Scatter3d ``line.width`` (pixels),
+    the cylinder radius lives in world (Å) coordinates so the segment
+    thickness scales with the camera zoom -- matching the rest of the
+    scene geometry. ``sides=5`` keeps the per-edge triangle count low
+    (10 verts per segment) so dense overlays stay cheap."""
+    payload = {"x": [], "y": [], "z": [], "i": [], "j": [], "k": []}
+    for start, end in segments:
+        verts, tris = _cylinder_mesh(start, end, float(radius), sides=int(sides))
+        if len(verts):
+            _append_mesh(payload, verts, tris)
+    if not payload["x"]:
+        return None
+    return go.Mesh3d(
+        x=payload["x"],
+        y=payload["y"],
+        z=payload["z"],
+        i=payload["i"],
+        j=payload["j"],
+        k=payload["k"],
+        color=color,
+        opacity=opacity,
+        flatshading=True,
+        hoverinfo="skip",
+        showlegend=False,
+        name=name or "line-mesh",
+    )
+
+
+def _dashed_segments(segments, *, dash_len: float, gap_len: float):
+    """Break each (start, end) into shorter sub-segments alternating
+    drawn / skipped, so the rendered cylinder bundle reads as a dashed
+    line. ``dash_len`` and ``gap_len`` are in world (Å) units."""
+    out: list[tuple[np.ndarray, np.ndarray]] = []
+    period = float(dash_len) + float(gap_len)
+    if period <= 0:
+        return list(segments)
+    for start, end in segments:
+        start = np.asarray(start, dtype=float)
+        end = np.asarray(end, dtype=float)
+        vec = end - start
+        length = float(np.linalg.norm(vec))
+        if length < 1e-8:
+            continue
+        direction = vec / length
+        cursor = 0.0
+        while cursor < length:
+            seg_start = start + direction * cursor
+            seg_end_dist = min(length, cursor + float(dash_len))
+            seg_end = start + direction * seg_end_dist
+            out.append((seg_start, seg_end))
+            cursor += period
+    return out
+
+
 def _unit_cell_traces(scene: dict, style: dict):
     if not style.get("show_unit_cell", False):
         return []
@@ -836,26 +900,16 @@ def _unit_cell_traces(scene: dict, style: dict):
         ("001", "101"), ("001", "011"),
         ("110", "111"), ("101", "111"), ("011", "111"),
     ]
-    xs, ys, zs = [], [], []
-    for start_key, end_key in edges:
-        start = corners[start_key]
-        end = corners[end_key]
-        xs.extend([float(start[0]), float(end[0]), None])
-        ys.extend([float(start[1]), float(end[1]), None])
-        zs.extend([float(start[2]), float(end[2]), None])
-    return [
-        go.Scatter3d(
-            x=xs,
-            y=ys,
-            z=zs,
-            mode="lines",
-            line=dict(color="#777777", width=4),
-            opacity=0.8,
-            hoverinfo="skip",
-            showlegend=False,
-            name="unit-cell-box",
-        )
-    ]
+    segments = [(corners[s], corners[e]) for s, e in edges]
+    trace = _segment_cylinder_trace(
+        segments,
+        radius=0.04,
+        color="#777777",
+        opacity=0.8,
+        sides=4,
+        name="unit-cell-box",
+    )
+    return [trace] if trace is not None else []
 
 
 def hull_mesh_trace(shell_coords, color: str, opacity: float = 0.15):
@@ -899,26 +953,26 @@ def hull_edge_traces(shell_coords, color: str):
         edges.add(tuple(sorted((int(b), int(c)))))
         edges.add(tuple(sorted((int(a), int(c)))))
 
-    xs, ys, zs = [], [], []
-    for i, j in sorted(edges):
-        p0 = coords[i]
-        p1 = coords[j]
-        xs.extend([float(p0[0]), float(p1[0]), None])
-        ys.extend([float(p0[1]), float(p1[1]), None])
-        zs.extend([float(p0[2]), float(p1[2]), None])
-    return [
-        go.Scatter3d(
-            x=xs,
-            y=ys,
-            z=zs,
-            mode="lines",
-            line=dict(color=color, width=6),
-            opacity=0.95,
-            hoverinfo="skip",
-            showlegend=False,
-            name="coordination-edges",
-        )
-    ]
+    segments = [(coords[i], coords[j]) for (i, j) in sorted(edges)]
+    # Edge thickness scales with the polyhedron itself: take a small
+    # fraction of the typical edge length so a tiny ClO4 tetrahedron and
+    # a large CN=12 cuboctahedron both look proportionally tubed (rather
+    # than the tetrahedron looking like a ball of pipes).
+    if segments:
+        lengths = [float(np.linalg.norm(np.asarray(b) - np.asarray(a))) for a, b in segments]
+        typical = float(np.median(lengths)) if lengths else 1.0
+        radius = max(0.025, min(0.085, 0.025 * typical))
+    else:
+        radius = 0.04
+    trace = _segment_cylinder_trace(
+        segments,
+        radius=radius,
+        color=color,
+        opacity=0.95,
+        sides=5,
+        name="coordination-edges",
+    )
+    return [trace] if trace is not None else []
 
 
 def shell_center_lines(center, shell_coords):
@@ -926,24 +980,22 @@ def shell_center_lines(center, shell_coords):
     coords = np.array(shell_coords, dtype=float)
     if len(coords) == 0:
         return []
-    xs, ys, zs = [], [], []
-    for point in coords:
-        xs.extend([float(center[0]), float(point[0]), None])
-        ys.extend([float(center[1]), float(point[1]), None])
-        zs.extend([float(center[2]), float(point[2]), None])
-    return [
-        go.Scatter3d(
-            x=xs,
-            y=ys,
-            z=zs,
-            mode="lines",
-            line=dict(color="#6A5ACD", width=4, dash="dash"),
-            opacity=0.85,
-            hoverinfo="skip",
-            showlegend=False,
-            name="coordination-lines",
-        )
-    ]
+    raw_segments = [(center, np.asarray(point, dtype=float)) for point in coords]
+    # Dash length tied to the typical bond length so the dash pattern
+    # holds its visual rhythm whether we're looking at a 1.5 Å Cl-O
+    # bond or a 5 Å rare-earth-O coordination radius.
+    lengths = [float(np.linalg.norm(b - a)) for a, b in raw_segments]
+    typical = float(np.median(lengths)) if lengths else 1.0
+    dash_segments = _dashed_segments(raw_segments, dash_len=0.18 * typical, gap_len=0.12 * typical)
+    trace = _segment_cylinder_trace(
+        dash_segments,
+        radius=max(0.018, 0.012 * typical),
+        color="#6A5ACD",
+        opacity=0.85,
+        sides=4,
+        name="coordination-lines",
+    )
+    return [trace] if trace is not None else []
 
 
 def _world_sphere_marker_trace(centers, *, radius, color, opacity=0.9):
