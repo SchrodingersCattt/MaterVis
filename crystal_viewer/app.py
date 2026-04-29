@@ -374,7 +374,7 @@ class ViewerBackend:
             state["topology_hull_color"] = str(patch["topology_hull_color"])
         if "fast_rendering" in patch:
             state["fast_rendering"] = bool(patch["fast_rendering"])
-        if "camera" in patch:
+        if "camera" in patch and patch["camera"] is not None:
             state["camera"] = patch["camera"]
         return state
 
@@ -1128,23 +1128,29 @@ def create_app(
             )
         else:
             resolved_site = None
-        backend.record_state(
-            {
-                "structure": structure,
-                "display_mode": display_mode,
-                "display_options": display_options,
-                "atom_scale": atom_scale,
-                "bond_radius": bond_radius,
-                "minor_opacity": minor_opacity,
-                "axis_scale": axis_scale,
-                "topology_species_keys": list(species_keys or []),
-                "topology_site_index": resolved_site,
-                "topology_enabled": "enabled" in (topology_toggle or []),
-                "topology_hull_color": topology_hull_color or "#7C5CBF",
-                "fast_rendering": "fast" in (fast_rendering_toggle or []),
-                "camera": camera,
-            }
-        )
+        # Only push the camera into the patch when the latest relayout
+        # actually carried one. Toggling a checkbox fires capture_state
+        # without changing relayoutData, but the previously-stored
+        # camera was getting clobbered by a fresh ``"camera": None``
+        # entry, which is why every Labels / Axes / Hydrogens click
+        # snapped the view back to the structure default.
+        patch: dict[str, Any] = {
+            "structure": structure,
+            "display_mode": display_mode,
+            "display_options": display_options,
+            "atom_scale": atom_scale,
+            "bond_radius": bond_radius,
+            "minor_opacity": minor_opacity,
+            "axis_scale": axis_scale,
+            "topology_species_keys": list(species_keys or []),
+            "topology_site_index": resolved_site,
+            "topology_enabled": "enabled" in (topology_toggle or []),
+            "topology_hull_color": topology_hull_color or "#7C5CBF",
+            "fast_rendering": "fast" in (fast_rendering_toggle or []),
+        }
+        if camera:
+            patch["camera"] = camera
+        backend.record_state(patch)
         return ""
 
     @app.callback(
