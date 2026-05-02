@@ -14,6 +14,7 @@
     splitter.dataset.bound = "1";
     splitter.addEventListener("mousedown", function (event) {
       event.preventDefault();
+      panel.classList.remove("analysis-panel--collapsed");
       const rootRect = root.getBoundingClientRect();
       document.body.classList.add("panel-resizing");
 
@@ -38,9 +39,26 @@
     });
   }
 
+  function bindAnalysisToggle() {
+    const toggle = document.getElementById("analysis-panel-toggle");
+    const panel = document.getElementById("right-panel");
+    if (!toggle || !panel || toggle.dataset.bound === "1") {
+      return;
+    }
+    toggle.dataset.bound = "1";
+    toggle.addEventListener("click", function (event) {
+      event.preventDefault();
+      panel.classList.toggle("analysis-panel--collapsed");
+      window.setTimeout(function () {
+        window.dispatchEvent(new Event("resize"));
+      }, 180);
+    });
+  }
+
   function init() {
     bindSplitter("left-splitter", "left-panel", "left");
     bindSplitter("right-splitter", "right-panel", "right");
+    bindAnalysisToggle();
   }
 
   if (document.readyState === "loading") {

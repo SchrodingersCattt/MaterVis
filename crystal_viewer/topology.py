@@ -69,25 +69,51 @@ def _neighbor_pool_uncached(bundle, center_fragment: dict, cutoff: float) -> lis
     allowed_types = set(_neighbor_types(fragments, center_type))
     center = np.array(center_fragment["center"], dtype=float)
     translations = _translation_grid(bundle, cutoff)
-    candidates = []
-    for fragment in fragments:
+    fragment_entries = []
+    for fragment_order, fragment in enumerate(fragments):
         if fragment["index"] == center_fragment["index"] and center_type not in {"X"}:
             continue
         if allowed_types and fragment.get("type", "?") not in allowed_types:
             continue
-        base_center = np.array(fragment["center"], dtype=float)
-        for na, nb, nc, shift_vec in translations:
-            if fragment["index"] == center_fragment["index"] and (na, nb, nc) == (0, 0, 0):
-                continue
-            point = base_center + shift_vec
-            distance = float(np.linalg.norm(point - center))
-            if 1e-8 < distance <= cutoff:
-                item = dict(fragment)
-                item["image_shift"] = [na, nb, nc]
-                item["center"] = [float(x) for x in point]
-                item["distance"] = distance
-                candidates.append(item)
-    candidates.sort(key=lambda item: item["distance"])
+        fragment_entries.append((fragment_order, fragment))
+    if not fragment_entries or not translations:
+        return []
+
+    base_centers = np.array([frag["center"] for _, frag in fragment_entries], dtype=float)
+    shift_vectors = np.array([item[3] for item in translations], dtype=float)
+    distances = np.linalg.norm(base_centers[:, None, :] + shift_vectors[None, :, :] - center, axis=-1)
+    mask = (distances > 1e-8) & (distances <= float(cutoff))
+
+    center_idx = int(center_fragment["index"])
+    zero_translation = np.array(
+        [(na, nb, nc) == (0, 0, 0) for na, nb, nc, _ in translations],
+        dtype=bool,
+    )
+    for row, (_, fragment) in enumerate(fragment_entries):
+        if int(fragment["index"]) == center_idx:
+            mask[row, zero_translation] = False
+
+    rows, cols = np.nonzero(mask)
+    if len(rows) == 0:
+        return []
+
+    insertion_order = np.array(
+        [fragment_entries[row][0] * len(translations) + int(col) for row, col in zip(rows, cols)],
+        dtype=int,
+    )
+    ranked = np.lexsort((insertion_order, distances[rows, cols]))
+    candidates = []
+    for pos in ranked:
+        row = int(rows[pos])
+        col = int(cols[pos])
+        fragment = fragment_entries[row][1]
+        na, nb, nc, shift_vec = translations[col]
+        point = base_centers[row] + shift_vec
+        item = dict(fragment)
+        item["image_shift"] = [na, nb, nc]
+        item["center"] = [float(x) for x in point]
+        item["distance"] = float(distances[row, col])
+        candidates.append(item)
     return candidates
 
 
@@ -407,16 +433,24 @@ def planarity_analysis(shell_coords: Iterable[Iterable[float]], group_size: int 
         return {"best_rms": None, "best_indices": [], "group_size": group_size}
     best_rms = float("inf")
     best_indices = None
-    for combo in itertools.combinations(range(len(coords)), group_size):
-        subset = coords[list(combo)]
-        centered = subset - subset.mean(axis=0)
+    combo_iter = itertools.combinations(range(len(coords)), group_size)
+    batch_size = 4096
+    while True:
+        batch = list(itertools.islice(combo_iter, batch_size))
+        if not batch:
+            break
+        idx = np.array(batch, dtype=int)
+        subsets = coords[idx]
+        centered = subsets - subsets.mean(axis=1, keepdims=True)
         _, _, vh = np.linalg.svd(centered, full_matrices=False)
-        normal = vh[-1]
-        distances = centered @ normal
-        rms = float(np.sqrt(np.mean(distances * distances)))
+        normals = vh[:, -1, :]
+        distances = np.einsum("bgi,bi->bg", centered, normals)
+        rms_values = np.sqrt(np.mean(distances * distances, axis=1))
+        batch_pos = int(np.argmin(rms_values))
+        rms = float(rms_values[batch_pos])
         if rms < best_rms:
             best_rms = rms
-            best_indices = combo
+            best_indices = tuple(int(x) for x in idx[batch_pos])
     return {
         "best_rms": best_rms if best_indices is not None else None,
         "best_indices": list(best_indices or []),

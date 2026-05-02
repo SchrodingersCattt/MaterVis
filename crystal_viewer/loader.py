@@ -13,6 +13,7 @@ from typing import Any, Dict, Iterable, Optional
 import numpy as np
 
 from .presets import get_default_catalog, workspace_root
+from . import molcrys_bridge
 from .scene import build_scene_from_atoms, legacy_scene, pc, scene_json, scene_metadata, scene_ops
 
 
@@ -30,8 +31,11 @@ class LoadedCrystal:
     scene_cache: dict[tuple[str, bool], Dict[str, Any]] = field(default_factory=dict)
     pymatgen_structure: Any | None = None
     crystal: Any | None = None
+    molcrys_analysis: Any | None = None
+    formula_unit_atoms: list[dict[str, Any]] = field(default_factory=list)
     fragment_table: list[dict[str, Any]] = field(default_factory=list)
     topology_fragment_table: list[dict[str, Any]] = field(default_factory=list)
+    fragment_table_cache: dict[tuple[Any, ...], tuple[list[dict[str, Any]], list[str]]] = field(default_factory=dict)
     atom_fragment_labels: list[str] = field(default_factory=list)
     source: str = "catalog"
 
@@ -133,6 +137,7 @@ def build_empty_bundle(
         scene_cache={("formula_unit", False): scene},
         fragment_table=[],
         topology_fragment_table=[],
+        fragment_table_cache={("scene", "formula_unit", False): ([], [])},
         atom_fragment_labels=[],
         source="placeholder",
     )
@@ -339,17 +344,29 @@ def build_bundle_scene(
         preset=preset,
         display_mode=display_mode,
         ops=ops,
+        formula_unit_atoms=bundle.formula_unit_atoms if display_mode == "formula_unit" else None,
     )
     scene["cif_path"] = bundle.cif_path
     scene["view_direction"] = view_dir
     scene["up"] = up
-    fragment_table, atom_fragment_labels = _fragment_table_from_atoms(
-        bundle.name,
-        scene["draw_atoms"],
-        scene["cell"],
-        scene["M"],
-        use_source_indices=False,
-    )
+    fragment_cache_key = ("scene", display_mode, bool(show_hydrogen))
+    cached_fragments = bundle.fragment_table_cache.get(fragment_cache_key)
+    if cached_fragments is None:
+        fragment_table, atom_fragment_labels = _fragment_table_from_atoms(
+            bundle.name,
+            scene["draw_atoms"],
+            scene["cell"],
+            scene["M"],
+            use_source_indices=False,
+            include_minor=True,
+        )
+        bundle.fragment_table_cache[fragment_cache_key] = (
+            copy.deepcopy(fragment_table),
+            list(atom_fragment_labels),
+        )
+    else:
+        fragment_table = copy.deepcopy(cached_fragments[0])
+        atom_fragment_labels = list(cached_fragments[1])
     scene["fragment_table"] = fragment_table
     scene["atom_fragment_labels"] = atom_fragment_labels
     bundle.scene_cache[cache_key] = scene
@@ -367,6 +384,8 @@ def build_loaded_crystal(
     ops = scene_ops()
     preset = preset or {}
     raw_atoms, cell, M = ops.parse_asu(cif_path)
+    molcrys_analysis = molcrys_bridge.analyze(raw_atoms, M)
+    formula_unit_atoms = molcrys_bridge.select_formula_unit(raw_atoms, M, analysis=molcrys_analysis)
     view_dir, up = legacy_scene._resolve_view(ops, name, raw_atoms, M, cell, preset)
     R = ops.view_rotation(view_dir, up)
     final_title = title or name
@@ -381,6 +400,7 @@ def build_loaded_crystal(
         show_hydrogen=False,
         display_mode="formula_unit",
         ops=ops,
+        formula_unit_atoms=formula_unit_atoms,
     )
     initial_scene["cif_path"] = cif_path
     initial_scene["view_direction"] = np.array(view_dir, dtype=float)
@@ -391,10 +411,21 @@ def build_loaded_crystal(
         initial_scene["cell"],
         initial_scene["M"],
         use_source_indices=False,
+        include_minor=True,
     )
     initial_scene["fragment_table"] = fragment_table
     initial_scene["atom_fragment_labels"] = atom_fragment_labels
     topology_fragment_table, _ = _fragment_table_from_atoms(name, raw_atoms, cell, M, use_source_indices=True, include_minor=True)
+    fragment_table_cache = {
+        ("scene", "formula_unit", False): (
+            copy.deepcopy(fragment_table),
+            list(atom_fragment_labels),
+        ),
+        ("topology",): (
+            copy.deepcopy(topology_fragment_table),
+            [],
+        ),
+    }
 
     bundle = LoadedCrystal(
         name=name,
@@ -406,9 +437,13 @@ def build_loaded_crystal(
         M=M,
         view_direction=np.array(view_dir, dtype=float).tolist(),
         up=np.array(up, dtype=float).tolist(),
+        crystal=molcrys_analysis.crystal,
+        molcrys_analysis=molcrys_analysis,
+        formula_unit_atoms=[dict(atom) for atom in formula_unit_atoms],
         scene_cache={("formula_unit", False): initial_scene},
         fragment_table=fragment_table,
         topology_fragment_table=topology_fragment_table,
+        fragment_table_cache=fragment_table_cache,
         atom_fragment_labels=atom_fragment_labels,
         source=source,
     )

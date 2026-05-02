@@ -15,29 +15,6 @@ from .legacy import crystal_scene as legacy_scene  # noqa: E402
 from .legacy import plot_crystal as pc  # noqa: E402
 
 
-def _cluster_components(n_items, pairs):
-    parents = list(range(n_items))
-
-    def find(idx):
-        while parents[idx] != idx:
-            parents[idx] = parents[parents[idx]]
-            idx = parents[idx]
-        return idx
-
-    def union(a, b):
-        ra, rb = find(a), find(b)
-        if ra != rb:
-            parents[ra] = rb
-
-    for i, j in pairs:
-        union(int(i), int(j))
-
-    groups: dict[int, list[int]] = {}
-    for idx in range(n_items):
-        groups.setdefault(find(idx), []).append(idx)
-    return [sorted(group) for _, group in sorted(groups.items(), key=lambda kv: min(kv[1]))]
-
-
 def scene_ops():
     return pc._scene_ops()
 
@@ -121,6 +98,8 @@ def scene_metadata(scene: Dict[str, Any]) -> Dict[str, Any]:
 def scene_json(scene: Dict[str, Any]) -> Dict[str, Any]:
     payload = {}
     for key, value in scene.items():
+        if str(key).startswith("_"):
+            continue
         if key == "cell":
             payload[key] = {
                 "a": float(value.a),
@@ -170,23 +149,22 @@ def _continuous_components(ops: Any, atoms, M, cell):
 
 
 def _best_component_shift_frac(component_atoms) -> np.ndarray:
-    best_shift = np.zeros(3, dtype=float)
-    best_score = np.inf
     fracs = np.array([atom["frac"] for atom in component_atoms], dtype=float)
-    for na in range(-2, 3):
-        for nb in range(-2, 3):
-            for nc in range(-2, 3):
-                shift = np.array([na, nb, nc], dtype=float)
-                shifted = fracs + shift[None, :]
-                lower = np.clip(-shifted, 0.0, None)
-                upper = np.clip(shifted - 1.0, 0.0, None)
-                outside_penalty = float(np.sum(lower * lower + upper * upper))
-                center_penalty = float(np.linalg.norm(shifted.mean(axis=0) - 0.5))
-                score = outside_penalty * 50.0 + center_penalty
-                if score < best_score:
-                    best_score = score
-                    best_shift = shift
-    return best_shift
+    shifts = np.array(
+        np.meshgrid(
+            np.arange(-2, 3, dtype=float),
+            np.arange(-2, 3, dtype=float),
+            np.arange(-2, 3, dtype=float),
+            indexing="ij",
+        )
+    ).reshape(3, -1).T
+    shifted = fracs[None, :, :] + shifts[:, None, :]
+    lower = np.clip(-shifted, 0.0, None)
+    upper = np.clip(shifted - 1.0, 0.0, None)
+    outside_penalty = np.sum(lower * lower + upper * upper, axis=(1, 2))
+    center_penalty = np.linalg.norm(shifted.mean(axis=1) - 0.5, axis=1)
+    scores = outside_penalty * 50.0 + center_penalty
+    return shifts[int(np.argmin(scores))]
 
 
 def _translate_component_frac(atoms, idxs, shift_frac, M):
@@ -208,140 +186,28 @@ def _whole_components_in_box(ops: Any, atoms, M, cell):
     return atoms_out
 
 
-def _heavy_stoichiometry(atoms_out, idxs) -> tuple:
-    """Multiset of heavy-atom elements in a cluster, as a hashable
-    signature. Atoms that belong to the same disorder assembly (the SHELX
-    PART convention encoded as ``_atom_site_disorder_assembly`` /
-    ``_atom_site_disorder_group``) collapse to a single contribution --
-    e.g. PEP's ethylenediammonium cluster contains C1, C1A, C2, C2A
-    where C1 and C1A are alternative positions of the same atom; the
-    "real" molecule has 2 carbons, not 4.
-
-    For atoms that share an assembly tag (e.g. all four C atoms have
-    ``da="B"`` with ``dg`` 1 vs 2) we count each ``(assembly, dg)``
-    bucket *of one element* as a single occupant of that assembly, then
-    take the maximum count across disorder groups inside the assembly.
-    Atoms with no disorder annotation contribute 1 each.
-    """
-    counts: dict[str, int] = {}
-    assemblies: dict[tuple[str, str], dict[str, int]] = {}
-    for idx in idxs:
-        atom = atoms_out[idx]
-        elem = atom.get("elem", "")
-        if elem == "H" or not elem:
-            continue
-        da = (atom.get("da") or ".").strip()
-        dg = (atom.get("dg") or ".").strip()
-        if da in ("", ".", "?"):
-            counts[elem] = counts.get(elem, 0) + 1
-            continue
-        bucket = assemblies.setdefault((elem, da), {})
-        bucket[dg] = bucket.get(dg, 0) + 1
-    for (elem, _da), bucket in assemblies.items():
-        # An assembly with two alternative positions of the same atom
-        # has two ``dg`` keys with the same count; we count the larger
-        # one (or any, since they're equal in practice) to avoid
-        # double-counting.
-        counts[elem] = counts.get(elem, 0) + max(bucket.values())
-    return tuple(sorted(counts.items()))
-
-
-def _augment_formula_unit_with_missing_species(ops, atoms_out, sel_idxs, cell, raw_atoms):
-    """Rebuild the organic part of the formula unit to be one molecule
-    per chemical species, leaving the anion (Cl-bearing) selection from
-    the legacy pass intact.
-
-    Two failure modes the legacy ``select_formula_unit`` had on the
-    perchlorate-and-amine family:
-
-    * Light cations like NH4+ coexisting with bulky cations like DABCO
-      were dropped because the size-vs-anchor 35% rule discarded them
-      (the DAP-4 case).
-    * In PEP both ethylenediammonium ((C2H10N2)2+) and piperazinium
-      ((C4H12N2)2+) are present, but the disorder-twinned ethylene
-      cation has *more atoms* (the C disorder copies inflate the count)
-      than the cleanly ordered piperazinium. The legacy "pick the two
-      largest organic clusters" rule then chose two copies of the
-      ethylenediammonium and dropped piperazinium entirely, surfacing as
-      the topology UI listing only ``C2N2`` and missing ``C4N2``.
-
-    Strategy: enumerate organic clusters in the post-reassembly
-    ``atoms_out``, group them by disorder-aware heavy stoichiometry
-    (so PEP's two distinct cation species separate cleanly even though
-    their *raw* signatures collide at ``(C4, N2)``), and keep one
-    cluster per species -- the one whose centroid is closest to the
-    legacy anchor centroid so the rebuilt formula unit stays spatially
-    coherent. The legacy anion selection (the four ClO4 groups) is
-    kept verbatim.
-    """
-    if not sel_idxs:
-        return sel_idxs
-
-    bond_pairs = ops.find_bonds(atoms_out, cell=cell)
-    components = _cluster_components(len(atoms_out), bond_pairs)
-
-    sel_set = set(sel_idxs)
-    anchor_centroid = np.mean(
-        [np.array(atoms_out[idx]["cart"], dtype=float) for idx in sel_idxs],
-        axis=0,
-    )
-
-    organics_by_sig: dict[tuple, list] = {}
-    selected = set()
-    for comp in components:
-        sig = _heavy_stoichiometry(atoms_out, comp)
-        if not sig:
-            continue
-        elements = {elem for elem, _ in sig}
-        if "Cl" in elements:
-            # Anion clusters: keep the legacy selection verbatim.
-            if any(idx in sel_set for idx in comp):
-                selected.update(comp)
-            continue
-        organics_by_sig.setdefault(sig, []).append(comp)
-
-    for sig, comps in organics_by_sig.items():
-        # If the legacy already picked exactly one cluster of this
-        # species, prefer that one so we don't relocate the molecule on
-        # screen for the user. Otherwise pick the cluster closest to the
-        # anchor centroid.
-        legacy_picks = [c for c in comps if any(idx in sel_set for idx in c)]
-        if len(legacy_picks) == 1:
-            selected.update(legacy_picks[0])
-            continue
-        candidates = legacy_picks if legacy_picks else comps
-        best_comp = None
-        best_dist = float("inf")
-        for comp in candidates:
-            centroid = np.mean(
-                [np.array(atoms_out[idx]["cart"], dtype=float) for idx in comp],
-                axis=0,
-            )
-            dist = float(np.linalg.norm(centroid - anchor_centroid))
-            if dist < best_dist:
-                best_dist = dist
-                best_comp = comp
-        if best_comp is not None:
-            selected.update(best_comp)
-    return sorted(selected)
-
-
-def _selected_atoms_for_mode(ops: Any, atoms, M, cell, display_mode: str):
+def _selected_atoms_for_mode(ops: Any, atoms, M, cell, display_mode: str, formula_unit_atoms=None):
     if display_mode == "unit_cell":
-        return _whole_components_in_box(ops, atoms, M, cell)
+        # Unit-cell mode promises the conventional-cell atom set with PBC
+        # bond imaging, not a locally reassembled molecular cluster. Returning
+        # the parsed cell directly avoids an O(N bonds + components) molecule
+        # reassembly pass on every first scope switch; bonds are still drawn
+        # with periodic endpoints below.
+        return [dict(atom) for atom in atoms]
     if display_mode == "asymmetric_unit":
-        asym_atoms = _asymmetric_unit_atoms(atoms)
-        return _whole_components_in_box(ops, asym_atoms, M, cell)
+        return _asymmetric_unit_atoms(atoms)
     if display_mode == "cluster":
         # Molecular cluster / isolated fragment: show every atom as parsed,
         # with no formula-unit trimming or periodic-image reassembly. Bonds
         # are detected directly from the stored Cartesian coordinates.
         return [dict(atom) for atom in atoms]
-    atoms_out, sel_idxs = ops.select_formula_unit(atoms, M, cell)
-    sel_idxs = _augment_formula_unit_with_missing_species(
-        ops, atoms_out, sel_idxs, cell, raw_atoms=atoms
-    )
-    return [atoms_out[idx] for idx in sel_idxs]
+    # formula_unit: defer to MolCrysKit so the per-species counts come from
+    # the cell composition / GCD rather than the legacy ``max_count=4``
+    # heuristic.  See crystal_viewer/molcrys_bridge.py.
+    if formula_unit_atoms is not None:
+        return [dict(atom) for atom in formula_unit_atoms]
+    from . import molcrys_bridge
+    return molcrys_bridge.select_formula_unit(atoms, M)
 
 
 def _bond_endpoints(ai, aj, cell, display_mode: str):
@@ -367,6 +233,7 @@ def build_scene_from_atoms(
     preset: Optional[Dict[str, Any]] = None,
     display_mode: str = "formula_unit",
     ops=None,
+    formula_unit_atoms=None,
 ) -> Dict[str, Any]:
     ops = scene_ops() if ops is None else ops
     preset = default_preset() if preset is None else preset
@@ -379,7 +246,14 @@ def build_scene_from_atoms(
     # preset still honours a user click on the "Hydrogens" checkbox.
     show_h = bool(show_hydrogen) or bool(entry.get("show_hydrogen", style.get("show_hydrogen", False)))
 
-    sel_atoms = _selected_atoms_for_mode(ops, atoms, M, cell, display_mode=display_mode)
+    sel_atoms = _selected_atoms_for_mode(
+        ops,
+        atoms,
+        M,
+        cell,
+        display_mode=display_mode,
+        formula_unit_atoms=formula_unit_atoms,
+    )
     draw_atoms = [dict(atom) for atom in sel_atoms if show_h or atom["elem"] != "H"]
 
     view_x = np.array(R[0], dtype=float)
@@ -490,6 +364,10 @@ def build_scene_from_cif(
     atoms, cell, M = ops.parse_asu(cif_path)
     view_dir, up = legacy_scene._resolve_view(ops, name, atoms, M, cell, preset)
     R = ops.view_rotation(view_dir, up)
+    formula_unit_atoms = None
+    if display_mode == "formula_unit":
+        from . import molcrys_bridge
+        formula_unit_atoms = molcrys_bridge.select_formula_unit(atoms, M)
     scene = build_scene_from_atoms(
         name=name,
         title=title,
@@ -501,6 +379,7 @@ def build_scene_from_cif(
         show_hydrogen=show_hydrogen,
         display_mode=display_mode,
         ops=ops,
+        formula_unit_atoms=formula_unit_atoms,
     )
     scene["cif_path"] = cif_path
     scene["view_direction"] = np.array(view_dir, dtype=float)

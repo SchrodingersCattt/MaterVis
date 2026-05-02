@@ -24,7 +24,8 @@ MatterVis/
 │   ├── scene.py         ← cell/cluster scene builder
 │   └── topology.py
 ├── docs/                ← sphinx sources, score tables
-└── examples/            ← runnable scripts that exercise the public API
+├── examples/            ← runnable scripts that exercise the public API
+└── scripts/             ← local/private analysis scripts; keep unpublished data ignored
 ```
 
 When adding a new feature, the module it belongs in is almost always

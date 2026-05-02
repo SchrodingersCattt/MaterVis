@@ -16,6 +16,11 @@ catalog.local.json
 uploads/
 exports/
 examples/_outputs/
+examples/data/HPEP.cif
+examples/data/MPEP.cif
+examples/data/PEP.cif
+examples/data/SY.cif
+scripts/_data/
 
 .DS_Store
 Thumbs.db

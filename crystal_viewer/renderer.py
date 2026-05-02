@@ -251,6 +251,18 @@ def _sphere_mesh(center: Iterable[float], radius: float, lat_steps: int = 9, lon
     return vertices, unit_triangles
 
 
+def _sphere_mesh_batch(centers: Iterable[Iterable[float]], radii: Iterable[float], lat_steps: int = 9, lon_steps: int = 14):
+    centers_arr = np.asarray(list(centers), dtype=float).reshape(-1, 3)
+    radii_arr = np.asarray(list(radii), dtype=float).reshape(-1)
+    if len(centers_arr) == 0:
+        return np.zeros((0, 3), dtype=float), np.zeros((0, 3), dtype=int)
+    unit_vertices, unit_triangles = _unit_sphere(lat_steps=lat_steps, lon_steps=lon_steps)
+    vertices = unit_vertices[None, :, :] * radii_arr[:, None, None] + centers_arr[:, None, :]
+    n_unit_vertices = len(unit_vertices)
+    triangles = unit_triangles[None, :, :] + (np.arange(len(centers_arr)) * n_unit_vertices)[:, None, None]
+    return vertices.reshape(-1, 3), triangles.reshape(-1, 3)
+
+
 def _cylinder_mesh(p0: Iterable[float], p1: Iterable[float], radius: float, sides: int = 8):
     start = np.array(p0, dtype=float)
     end = np.array(p1, dtype=float)
@@ -285,6 +297,52 @@ def _cylinder_mesh(p0: Iterable[float], p1: Iterable[float], radius: float, side
         b1 = nxt + sides
         triangles.extend([[a0, b0, a1], [a1, b0, b1], [cap0, a1, a0], [cap1, b0, b1]])
     return vertices, np.array(triangles, dtype=int)
+
+
+def _cylinder_mesh_batch(segments, radius: float, sides: int = 8):
+    segments = list(segments)
+    if not segments:
+        return np.zeros((0, 3), dtype=float), np.zeros((0, 3), dtype=int)
+    starts = np.asarray([seg[0] for seg in segments], dtype=float)
+    ends = np.asarray([seg[1] for seg in segments], dtype=float)
+    axes = ends - starts
+    lengths = np.linalg.norm(axes, axis=1)
+    valid = lengths >= 1e-8
+    if not np.any(valid):
+        return np.zeros((0, 3), dtype=float), np.zeros((0, 3), dtype=int)
+    starts = starts[valid]
+    ends = ends[valid]
+    axes = axes[valid] / lengths[valid, None]
+
+    refs = np.tile(np.array([0.0, 0.0, 1.0], dtype=float), (len(axes), 1))
+    refs[np.abs(axes @ np.array([0.0, 0.0, 1.0], dtype=float)) > 0.92] = np.array([0.0, 1.0, 0.0])
+    u = np.cross(axes, refs)
+    u /= np.linalg.norm(u, axis=1)[:, None]
+    v = np.cross(axes, u)
+
+    angles = np.linspace(0.0, 2.0 * math.pi, int(sides), endpoint=False)
+    offsets = (
+        np.cos(angles)[None, :, None] * u[:, None, :]
+        + np.sin(angles)[None, :, None] * v[:, None, :]
+    ) * float(radius)
+    ring0 = starts[:, None, :] + offsets
+    ring1 = ends[:, None, :] + offsets
+    vertices = np.concatenate([ring0, ring1, starts[:, None, :], ends[:, None, :]], axis=1)
+
+    local_tris = []
+    cap0 = 2 * int(sides)
+    cap1 = cap0 + 1
+    for idx in range(int(sides)):
+        nxt = (idx + 1) % int(sides)
+        a0 = idx
+        a1 = nxt
+        b0 = idx + int(sides)
+        b1 = nxt + int(sides)
+        local_tris.extend([[a0, b0, a1], [a1, b0, b1], [cap0, a1, a0], [cap1, b0, b1]])
+    local_tris_arr = np.asarray(local_tris, dtype=int)
+    n_vertices_per_segment = 2 * int(sides) + 2
+    triangles = local_tris_arr[None, :, :] + (np.arange(len(starts)) * n_vertices_per_segment)[:, None, None]
+    return vertices.reshape(-1, 3), triangles.reshape(-1, 3)
 
 
 def _atom_selection_trace(scene: dict, style: dict):
@@ -327,26 +385,25 @@ def _bond_mesh_traces(scene: dict, style: dict):
     radius = max(0.04, float(style["bond_radius"]))
     for color, is_minor, start, end in _bond_segments(scene, style):
         key = (color, is_minor)
-        groups.setdefault(key, {"x": [], "y": [], "z": [], "i": [], "j": [], "k": []})
-        vertices, triangles = _cylinder_mesh(
-            start,
-            end,
-            radius * (float(style["minor_bond_scale"]) if is_minor else 1.0),
-            sides=6,
-        )
-        if len(vertices):
-            _append_mesh(groups[key], vertices, triangles)
+        groups.setdefault(key, {"segments": []})["segments"].append((start, end))
 
     traces = []
     for (color, is_minor), payload in groups.items():
+        vertices, triangles = _cylinder_mesh_batch(
+            payload["segments"],
+            radius * (float(style["minor_bond_scale"]) if is_minor else 1.0),
+            sides=6,
+        )
+        if len(vertices) == 0:
+            continue
         traces.append(
             go.Mesh3d(
-                x=payload["x"],
-                y=payload["y"],
-                z=payload["z"],
-                i=payload["i"],
-                j=payload["j"],
-                k=payload["k"],
+                x=vertices[:, 0],
+                y=vertices[:, 1],
+                z=vertices[:, 2],
+                i=triangles[:, 0],
+                j=triangles[:, 1],
+                k=triangles[:, 2],
                 color=color,
                 opacity=float(style["minor_opacity"]) if is_minor else 1.0,
                 hoverinfo="skip",
@@ -376,23 +433,29 @@ def _atom_mesh_traces(scene: dict, style: dict):
         if style.get("show_minor_only", False) and not atom["is_minor"]:
             continue
         key = (atom["color"], atom["is_minor"])
-        groups.setdefault(key, {"x": [], "y": [], "z": [], "i": [], "j": [], "k": []})
+        groups.setdefault(key, {"centers": [], "radii": []})
         radius = float(atom["atom_radius"]) * float(style["atom_scale"])
         if atom["is_minor"]:
             radius *= 1.12
-        vertices, triangles = _sphere_mesh(atom["cart"], radius, lat_steps=lat_steps, lon_steps=lon_steps)
-        _append_mesh(groups[key], vertices, triangles)
+        groups[key]["centers"].append(atom["cart"])
+        groups[key]["radii"].append(radius)
 
     traces = []
     for (color, is_minor), payload in groups.items():
+        vertices, triangles = _sphere_mesh_batch(
+            payload["centers"],
+            payload["radii"],
+            lat_steps=lat_steps,
+            lon_steps=lon_steps,
+        )
         traces.append(
             go.Mesh3d(
-                x=payload["x"],
-                y=payload["y"],
-                z=payload["z"],
-                i=payload["i"],
-                j=payload["j"],
-                k=payload["k"],
+                x=vertices[:, 0],
+                y=vertices[:, 1],
+                z=vertices[:, 2],
+                i=triangles[:, 0],
+                j=triangles[:, 1],
+                k=triangles[:, 2],
                 color=color,
                 opacity=max(0.48, float(style["minor_opacity"])) if is_minor else float(style.get("major_opacity", 1.0)),
                 hoverinfo="skip",
@@ -606,6 +669,13 @@ def _highlight_traces(scene: dict, style: dict):
 def _label_traces(scene: dict, style: dict):
     if not style.get("show_labels", True):
         return []
+    cache = scene.setdefault("_label_trace_cache", {})
+    key = (
+        bool(style.get("show_minor_only", False)),
+        round(float(style.get("label_font_size", 12)), 3),
+    )
+    if key in cache:
+        return cache[key]
     # Use a single font size for every atom label (was 10 vs 11 split by
     # minor-disorder flag, which read as inconsistent typography rather than
     # signalling "minor"). Disorder is conveyed by colour only; size stays uniform.
@@ -639,7 +709,8 @@ def _label_traces(scene: dict, style: dict):
                 showlegend=False,
             )
         )
-    return traces
+    cache[key] = [tr.to_plotly_json() for tr in traces]
+    return cache[key]
 
 
 def _axis_traces(scene: dict, style: dict):
@@ -855,20 +926,16 @@ def _segment_cylinder_trace(segments, *, radius: float, color: str, opacity: flo
     thickness scales with the camera zoom -- matching the rest of the
     scene geometry. ``sides=5`` keeps the per-edge triangle count low
     (10 verts per segment) so dense overlays stay cheap."""
-    payload = {"x": [], "y": [], "z": [], "i": [], "j": [], "k": []}
-    for start, end in segments:
-        verts, tris = _cylinder_mesh(start, end, float(radius), sides=int(sides))
-        if len(verts):
-            _append_mesh(payload, verts, tris)
-    if not payload["x"]:
+    verts, tris = _cylinder_mesh_batch(segments, float(radius), sides=int(sides))
+    if len(verts) == 0:
         return None
     return go.Mesh3d(
-        x=payload["x"],
-        y=payload["y"],
-        z=payload["z"],
-        i=payload["i"],
-        j=payload["j"],
-        k=payload["k"],
+        x=verts[:, 0],
+        y=verts[:, 1],
+        z=verts[:, 2],
+        i=tris[:, 0],
+        j=tris[:, 1],
+        k=tris[:, 2],
         color=color,
         opacity=opacity,
         flatshading=True,
@@ -1207,7 +1274,7 @@ def topology_background_traces(topology_data: dict | None, style: dict | None = 
 
     traces = list(_merged_hull_mesh(overlays_with_opacity, color=hull_color))
     traces.extend(_merged_hull_edges([c for c, _ in overlays_with_opacity], color=hull_color))
-    cache[hull_color] = [tr.to_plotly_json() if not isinstance(tr, dict) else tr for tr in traces]
+    cache[hull_color] = [_trace_to_json_safe_dict(tr) for tr in traces]
     return cache[hull_color]
 
 
@@ -1256,7 +1323,7 @@ def topology_foreground_traces(topology_data: dict | None, style: dict | None = 
         )
         if extra_marker is not None:
             traces.append(extra_marker)
-    cache[hull_color] = [tr.to_plotly_json() if not isinstance(tr, dict) else tr for tr in traces]
+    cache[hull_color] = [_trace_to_json_safe_dict(tr) for tr in traces]
     return cache[hull_color]
 
 
@@ -1377,6 +1444,23 @@ def _traces_to_dicts(traces) -> list[dict]:
     return out
 
 
+def _trace_to_json_safe_dict(trace) -> dict:
+    payload = trace if isinstance(trace, dict) else trace.to_plotly_json()
+    return _json_safe_plotly(payload)
+
+
+def _json_safe_plotly(value):
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, (np.integer, np.floating)):
+        return value.item()
+    if isinstance(value, dict):
+        return {key: _json_safe_plotly(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe_plotly(item) for item in value]
+    return value
+
+
 def _cached_atom_bond_meshes(scene: dict, style: dict, *, use_fast: bool):
     """Cache atom + bond mesh trace dicts on the scene. Building Mesh3d
     objects (sphere tessellation + Plotly array validation) is by far the
@@ -1390,11 +1474,11 @@ def _cached_atom_bond_meshes(scene: dict, style: dict, *, use_fast: bool):
     key = (
         bool(use_fast),
         bool(style.get("show_minor_only", False)),
-        round(float(style.get("atom_scale", 1.0)), 6),
-        round(float(style.get("bond_radius", 0.1)), 6),
-        round(float(style.get("minor_opacity", 0.35)), 6),
-        round(float(style.get("minor_bond_scale", 0.6)), 6),
-        round(float(style.get("major_opacity", 1.0)), 6),
+        round(float(style.get("atom_scale", 1.0)), 3),
+        round(float(style.get("bond_radius", 0.1)), 3),
+        round(float(style.get("minor_opacity", 0.35)), 3),
+        round(float(style.get("minor_bond_scale", 0.6)), 3),
+        round(float(style.get("major_opacity", 1.0)), 3),
     )
     if key in cache:
         return cache[key]
@@ -1478,9 +1562,11 @@ def build_figure(scene: dict, style: dict, topology_data: dict | None = None) ->
     ) < 1e-6
     aspectmode = "cube" if is_cube else "data"
 
+    ui_revision = style.get("uirevision", str(scene.get("name", "scene")))
     layout_kwargs = dict(
         title=title_arg,
         showlegend=False,
+        uirevision=ui_revision,
         paper_bgcolor=style.get("background", "#FFFFFF"),
         plot_bgcolor=style.get("background", "#FFFFFF"),
         margin=dict(l=0, r=0, t=top_margin, b=0),
@@ -1490,6 +1576,7 @@ def build_figure(scene: dict, style: dict, topology_data: dict | None = None) ->
             zaxis=dict(visible=False, range=zr),
             aspectmode=aspectmode,
             camera=_plotly_camera_from_scene(scene),
+            uirevision=ui_revision,
             bgcolor=style.get("background", "#FFFFFF"),
         ),
     )
