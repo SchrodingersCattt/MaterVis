@@ -2,23 +2,35 @@ from __future__ import annotations
 
 import itertools
 import math
-from typing import Any, Dict, Iterable, Sequence
+from typing import Any, Iterable
 
 import numpy as np
 
-from .ideal_polyhedra import ideal_polyhedra_for_cn
+from molcrys_kit.analysis.packing_shell import (
+    DEFAULT_CENTROID_OFFSET_FRAC,
+    angular_rmsd_vs_ideals,
+    compute_angular_signature,
+    detect_coordination_number,
+    detect_prism_vs_antiprism,
+    hull_encloses_center as _hull_encloses_center,
+    planarity_analysis,
+)
+from molcrys_kit.structures.polyhedra import convex_hull_payload, ideal_polyhedra_for_cn
 
-try:
-    from scipy.spatial import ConvexHull
-except Exception:  # pragma: no cover - optional dependency
-    ConvexHull = None
-
-
-def _array(points: Iterable[Iterable[float]]) -> np.ndarray:
-    arr = np.array(list(points), dtype=float)
-    if arr.ndim == 1:
-        return arr.reshape(1, -1)
-    return arr
+__all__ = [
+    "DEFAULT_CENTROID_OFFSET_FRAC",
+    "_hull_encloses_center",
+    "analyze_topology",
+    "angular_rmsd_vs_ideals",
+    "classify_fragments",
+    "compute_angular_signature",
+    "convex_hull_payload",
+    "detect_coordination_number",
+    "detect_prism_vs_antiprism",
+    "extract_coordination_shell",
+    "ideal_polyhedra_for_cn",
+    "planarity_analysis",
+]
 
 
 def classify_fragments(bundle) -> list[dict[str, Any]]:
@@ -135,150 +147,6 @@ def _neighbor_pool(bundle, center_fragment: dict, cutoff: float) -> list[dict[st
     return cache[key]
 
 
-DEFAULT_CENTROID_OFFSET_FRAC = 0.15
-
-
-def _hull_encloses_center(
-    coords: np.ndarray,
-    center: np.ndarray,
-    *,
-    centroid_offset_frac: float = DEFAULT_CENTROID_OFFSET_FRAC,
-    face_tol: float = 1e-3,
-) -> bool:
-    """True iff ``center`` is *centred inside* the convex hull of ``coords``.
-
-    A coordination polyhedron XYn is geometrically meaningful only when X
-    sits roughly at the middle of the cage of Y. Two conditions have to hold:
-
-    1. **Topological enclosure** - ``center`` must be on the interior side
-       of every face of ``ConvexHull(coords)``. This rejects shells that
-       bulge entirely onto one side of X.
-    2. **Centrality** - the centroid of ``coords`` must be within
-       ``centroid_offset_frac`` of the mean shell radius from ``center``.
-       This rejects "tetrahedral pocket" configurations where X is
-       topologically enclosed but pressed against one face - chemically
-       those are not XYn polyhedra, they are partial coordination spheres.
-
-    Together the two checks turn what was a topological enclosure test
-    into a chemically defensible "X really sits inside Yn" predicate.
-    """
-    coords = np.asarray(coords, dtype=float)
-    center = np.asarray(center, dtype=float)
-    if len(coords) < 4 or ConvexHull is None:
-        return False
-    try:
-        hull = ConvexHull(coords)
-    except Exception:
-        return False
-    plane_vals = hull.equations[:, :3] @ center + hull.equations[:, 3]
-    if np.any(plane_vals > face_tol):
-        return False
-    centroid = coords.mean(axis=0)
-    radii = np.linalg.norm(coords - centroid, axis=1)
-    mean_radius = float(np.mean(radii)) if len(radii) else 0.0
-    if mean_radius < 1e-6:
-        return True
-    offset = float(np.linalg.norm(center - centroid))
-    return offset <= centroid_offset_frac * mean_radius
-
-
-def detect_coordination_number(
-    distances: Sequence[float],
-    fallback_max: int | None = None,
-    *,
-    coords: Sequence[Sequence[float]] | None = None,
-    center: Sequence[float] | None = None,
-    enforce_enclosure: bool = True,
-    centroid_offset_frac: float = DEFAULT_CENTROID_OFFSET_FRAC,
-) -> dict[str, Any]:
-    """Choose a coordination number (CN) for an ordered list of neighbour distances.
-
-    The base heuristic is the largest gap in the sorted distance list - the
-    classical "first coordination shell" cut. When ``coords`` and ``center``
-    are provided **and** ``enforce_enclosure`` is true, the chosen shell is
-    additionally required to satisfy the XYn definition: the chosen shell
-    must topologically enclose X **and** keep X within
-    ``centroid_offset_frac`` of the mean shell radius from the shell
-    centroid (chemical centrality). If the gap-defined CN fails either of
-    those, the search walks CN monotonically upward until both conditions
-    are met or the candidate pool is exhausted.
-
-    The returned payload includes the raw gap-only CN under
-    ``primary_gap_cn`` and an ``enclosed`` flag describing whether the
-    *final* shell actually wraps the centre, so the UI can warn loudly
-    when no enclosing shell is reachable inside the search cutoff.
-    """
-    sorted_distances = np.sort(np.array(distances, dtype=float))
-    n = len(sorted_distances)
-    if n == 0:
-        return {
-            "coordination_number": 0, "gap_index": None, "gap_value": None,
-            "enclosed": False, "enclosure_expanded": False,
-            "primary_gap_cn": 0, "sorted_distances": [], "gaps": [],
-        }
-    if n == 1:
-        return {
-            "coordination_number": 1, "gap_index": 0, "gap_value": 0.0,
-            "enclosed": False, "enclosure_expanded": False,
-            "primary_gap_cn": 1, "sorted_distances": sorted_distances.tolist(), "gaps": [],
-        }
-
-    gaps = np.diff(sorted_distances)
-    primary_cn = int(np.argmax(gaps) + 1)
-    cn = primary_cn
-    enclosed = False
-    expanded = False
-
-    coords_arr = np.asarray(coords, dtype=float) if coords is not None else None
-    center_arr = np.asarray(center, dtype=float) if center is not None else None
-    if (
-        enforce_enclosure
-        and coords_arr is not None
-        and center_arr is not None
-        and len(coords_arr) >= 4
-    ):
-        # Coords arrive in distance-sorted order (caller's contract).
-        if _hull_encloses_center(
-            coords_arr[:primary_cn], center_arr,
-            centroid_offset_frac=centroid_offset_frac,
-        ):
-            enclosed = True
-        else:
-            # Walk CN monotonically upward from primary_gap_cn. This is
-            # less clever than a gap-ranked walk but it matches chemistry:
-            # if the natural first-shell cut doesn't actually wrap X then
-            # the next "complete" shell is at the smallest super-shell that
-            # achieves both topological enclosure and centrality, regardless
-            # of where the gap maxima fall.
-            for candidate_cn in range(primary_cn + 1, len(coords_arr) + 1):
-                if candidate_cn < 4:
-                    continue
-                if _hull_encloses_center(
-                    coords_arr[:candidate_cn], center_arr,
-                    centroid_offset_frac=centroid_offset_frac,
-                ):
-                    cn = candidate_cn
-                    enclosed = True
-                    expanded = True
-                    break
-
-    if fallback_max is not None:
-        cn = min(cn, int(fallback_max))
-    cn = max(1, cn)
-    gap_index = min(cn - 1, len(gaps) - 1) if len(gaps) > 0 else None
-    gap_value = float(gaps[gap_index]) if gap_index is not None else None
-    return {
-        "coordination_number": cn,
-        "gap_index": gap_index,
-        "gap_value": gap_value,
-        "sorted_distances": sorted_distances.tolist(),
-        "gaps": gaps.tolist(),
-        "primary_gap_cn": primary_cn,
-        "enclosed": enclosed,
-        "enclosure_expanded": expanded,
-    }
-
-
 def _extract_coordination_shell_static(
     bundle,
     center_index: int,
@@ -384,112 +252,6 @@ def extract_coordination_shell(
         "distances": static["distances"],
         "all_distances": static["all_distances"],
         "pool_coords": pool_coords_arr.tolist(),
-    }
-
-
-def compute_angular_signature(shell_coords: Iterable[Iterable[float]], center: Iterable[float] | None = None) -> dict[str, Any]:
-    coords = _array(shell_coords)
-    if len(coords) == 0:
-        return {"angles": [], "sorted_angles": [], "count": 0}
-    center_vec = np.zeros(3, dtype=float) if center is None else np.array(center, dtype=float)
-    vectors = coords - center_vec
-    norms = np.linalg.norm(vectors, axis=1)
-    angles = []
-    for i, j in itertools.combinations(range(len(vectors)), 2):
-        if norms[i] < 1e-8 or norms[j] < 1e-8:
-            continue
-        cosang = np.clip(np.dot(vectors[i], vectors[j]) / (norms[i] * norms[j]), -1.0, 1.0)
-        angles.append(float(np.degrees(np.arccos(cosang))))
-    angles.sort()
-    return {"angles": angles, "sorted_angles": angles, "count": len(angles)}
-
-
-def angular_rmsd_vs_ideals(shell_coords: Iterable[Iterable[float]], center: Iterable[float] | None = None) -> dict[str, Any]:
-    coords = _array(shell_coords)
-    cn = int(len(coords))
-    signature = compute_angular_signature(coords, center=center)
-    actual = np.array(signature["sorted_angles"], dtype=float)
-    results = []
-    for name, ideal in ideal_polyhedra_for_cn(cn).items():
-        ideal_signature = np.array(compute_angular_signature(ideal)["sorted_angles"], dtype=float)
-        size = min(len(actual), len(ideal_signature))
-        if size == 0:
-            rmsd = float("inf")
-        else:
-            diff = actual[:size] - ideal_signature[:size]
-            rmsd = float(np.sqrt(np.mean(diff * diff)))
-        results.append({"name": name, "angular_rmsd": rmsd})
-    results.sort(key=lambda item: item["angular_rmsd"])
-    return {
-        "coordination_number": cn,
-        "results": results,
-        "best_match": results[0] if results else None,
-    }
-
-
-def planarity_analysis(shell_coords: Iterable[Iterable[float]], group_size: int = 5) -> dict[str, Any]:
-    coords = _array(shell_coords)
-    if len(coords) < group_size:
-        return {"best_rms": None, "best_indices": [], "group_size": group_size}
-    best_rms = float("inf")
-    best_indices = None
-    combo_iter = itertools.combinations(range(len(coords)), group_size)
-    batch_size = 4096
-    while True:
-        batch = list(itertools.islice(combo_iter, batch_size))
-        if not batch:
-            break
-        idx = np.array(batch, dtype=int)
-        subsets = coords[idx]
-        centered = subsets - subsets.mean(axis=1, keepdims=True)
-        _, _, vh = np.linalg.svd(centered, full_matrices=False)
-        normals = vh[:, -1, :]
-        distances = np.einsum("bgi,bi->bg", centered, normals)
-        rms_values = np.sqrt(np.mean(distances * distances, axis=1))
-        batch_pos = int(np.argmin(rms_values))
-        rms = float(rms_values[batch_pos])
-        if rms < best_rms:
-            best_rms = rms
-            best_indices = tuple(int(x) for x in idx[batch_pos])
-    return {
-        "best_rms": best_rms if best_indices is not None else None,
-        "best_indices": list(best_indices or []),
-        "group_size": group_size,
-    }
-
-
-def detect_prism_vs_antiprism(shell_coords: Iterable[Iterable[float]]) -> dict[str, Any]:
-    coords = _array(shell_coords)
-    if len(coords) < 10:
-        return {"classification": None, "twist_deg": None}
-    z_sorted = np.argsort(coords[:, 2])
-    bottom = coords[z_sorted[:5]]
-    top = coords[z_sorted[-5:]]
-    top_angles = np.sort(np.degrees(np.arctan2(top[:, 1], top[:, 0])) % 360.0)
-    bottom_angles = np.sort(np.degrees(np.arctan2(bottom[:, 1], bottom[:, 0])) % 360.0)
-    shifts = []
-    for angle_top, angle_bottom in zip(top_angles, bottom_angles):
-        delta = (angle_top - angle_bottom + 180.0) % 360.0 - 180.0
-        shifts.append(abs(delta))
-    twist = float(np.mean(shifts))
-    classification = "antiprism" if twist > 18.0 else "prism"
-    return {"classification": classification, "twist_deg": twist}
-
-
-def convex_hull_payload(shell_coords: Iterable[Iterable[float]]) -> dict[str, Any]:
-    coords = _array(shell_coords)
-    if len(coords) < 4 or ConvexHull is None:
-        return {"vertices": coords.tolist(), "simplices": [], "edges": []}
-    hull = ConvexHull(coords)
-    edges = set()
-    for simplex in hull.simplices:
-        simplex = list(simplex)
-        for i, j in itertools.combinations(simplex, 2):
-            edges.add(tuple(sorted((int(i), int(j)))))
-    return {
-        "vertices": coords.tolist(),
-        "simplices": hull.simplices.tolist(),
-        "edges": [list(edge) for edge in sorted(edges)],
     }
 
 
