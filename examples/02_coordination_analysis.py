@@ -140,8 +140,13 @@ def main() -> None:
     fig = build_figure(bundle.scene, style, topology_data=topology)
     best_name = topology["angular"]["best_match"]["name"] if topology["angular"].get("best_match") else "n/a"
     fig.update_layout(
-        title=f"DAP-4 · {target['label']} ({target['species']}) · "
-              f"CN={topology['coordination_number']} · best ideal: {best_name}"
+        title=dict(
+            text=(
+                f"DAP-4 · {target['label']} ({target['species']}) · "
+                f"CN={topology['coordination_number']} · best ideal: {best_name}"
+            ),
+            x=0.5,
+        )
     )
 
     png = OUTPUT_DIR / "02_coordination_render.png"
@@ -150,7 +155,10 @@ def main() -> None:
 
     hist = topology_histogram_figure(topology)
     hist.update_layout(
-        title=f"{target['label']}: neighbour distances  (gap = {_fmt(topology['gap_info'].get('gap_value'), 3, ' Å')})"
+        title=dict(
+            text=f"{target['label']}: neighbour distances  (gap = {_fmt(topology['gap_info'].get('gap_value'), 3, ' Å')})",
+            x=0.5,
+        )
     )
     hist_png = OUTPUT_DIR / "02_coordination_histogram.png"
     hist.write_image(str(hist_png), width=900, height=420, scale=2)

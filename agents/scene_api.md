@@ -13,6 +13,9 @@ Parses a CIF and returns a scene dict consumable by
 `crystal_viewer.renderer.build_figure`. Honours `display_mode`:
 
 - `formula_unit` (default) — single formula unit centred in the cell.
+  Per-species counts come from MolCrysKit's
+  `StoichiometryAnalyzer.get_simplest_unit()` (unit-cell species counts
+  divided by their GCD), not MatterVis-local hard-coded heuristics.
 - `unit_cell` — every atom of the conventional cell, with PBC bond
   imaging.
 - `asymmetric_unit` — only the asymmetric unit is drawn.

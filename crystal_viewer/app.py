@@ -7,6 +7,7 @@ import os
 import subprocess
 import tempfile
 import threading
+import time
 from typing import Any, Dict, Iterable, Optional
 
 import numpy as np
@@ -95,6 +96,53 @@ def _plotly_camera(camera: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]
     }
 
 
+def _camera_from_relayout_data(
+    relayout_data: Optional[dict[str, Any]],
+    current_camera: Optional[dict[str, Any]] = None,
+) -> Optional[dict[str, Any]]:
+    """Extract a complete Plotly camera from Dash relayout payloads.
+
+    Plotly may emit either ``{"scene.camera": {...}}`` or dotted partial
+    updates such as ``{"scene.camera.eye.x": 1.2}``.  The latter used to be
+    ignored, so the next checkbox-triggered redraw fell back to the default
+    scene camera.
+    """
+    if not relayout_data:
+        return None
+    direct = relayout_data.get("scene.camera")
+    if isinstance(direct, dict):
+        return direct
+    scene_payload = relayout_data.get("scene")
+    if isinstance(scene_payload, dict) and isinstance(scene_payload.get("camera"), dict):
+        return scene_payload["camera"]
+
+    base = copy.deepcopy(_plotly_camera(current_camera) or {})
+    changed = False
+
+    def ensure_group(group: str) -> dict[str, float]:
+        nonlocal changed
+        value = base.setdefault(group, {})
+        if not isinstance(value, dict):
+            value = {}
+            base[group] = value
+        changed = True
+        return value
+
+    for group in ("eye", "center", "up"):
+        group_payload = relayout_data.get(f"scene.camera.{group}")
+        if isinstance(group_payload, dict):
+            target = ensure_group(group)
+            for axis in ("x", "y", "z"):
+                if axis in group_payload:
+                    target[axis] = float(group_payload[axis])
+            continue
+        for axis in ("x", "y", "z"):
+            key = f"scene.camera.{group}.{axis}"
+            if key in relayout_data:
+                ensure_group(group)[axis] = float(relayout_data[key])
+    return base if changed else None
+
+
 def _camera_vectors(camera: Optional[dict[str, Any]]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     cam = _plotly_camera(camera) or {
         "eye": {"x": 0.0, "y": 0.0, "z": 1.8},
@@ -170,6 +218,7 @@ class ViewerBackend:
         first_name = self.structure_names[0]
         self.current_state = self.default_state(first_name)
         self.pending_state: Optional[dict[str, Any]] = None
+        self._first_figure_ready = threading.Event()
         self.version = 0
 
     def default_state(self, structure: str) -> dict[str, Any]:
@@ -441,9 +490,9 @@ class ViewerBackend:
         bundle.fragment_table = scene.get("fragment_table", bundle.fragment_table)
         return scene
 
-    def style_for_state(self, state: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    def style_for_state(self, state: Optional[dict[str, Any]] = None, scene: Optional[dict[str, Any]] = None) -> dict[str, Any]:
         state = self.current_state if state is None else state
-        scene = self.scene_for_state(state)
+        scene = self.scene_for_state(state) if scene is None else scene
         style = dict(scene.get("style", {}))
         style.update(
             style_from_controls(
@@ -709,7 +758,7 @@ class ViewerBackend:
         state = self.get_state() if state is None else state
         scene = self.scene_for_state(state)
         topology_data = self.topology_for_state(state, click_data=click_data)
-        fig = build_figure(scene, self.style_for_state(state), topology_data=topology_data)
+        fig = build_figure(scene, self.style_for_state(state, scene=scene), topology_data=topology_data)
         camera = _plotly_camera(state.get("camera"))
         if camera:
             fig.update_layout(scene_camera=camera)
@@ -864,11 +913,13 @@ def create_app(
 
     first_state = backend.get_state()
     first_figure, first_topology = backend.figure_for_state(first_state)
+    backend._first_figure_ready.set()
     first_scene = backend.scene_for_state(first_state)
 
     app.layout = html.Div(
         [
             dcc.Store(id="agent-state-store", data=first_state),
+            dcc.Store(id="camera-state-store", data=first_state.get("camera")),
             dcc.Interval(id="agent-state-poll", interval=800, n_intervals=0),
             html.Div(id="state-sync-sentinel", style={"display": "none"}),
             html.Div(
@@ -1035,34 +1086,71 @@ def create_app(
             html.Div(id="right-splitter", className="panel-splitter"),
             html.Div(
                 [
-                    html.H4("Topology Analysis"),
-                    html.Label(
-                        "Analyze fragment",
-                        htmlFor="topology-site-index",
-                        style={"fontSize": "13px", "fontWeight": "bold", "display": "block"},
-                    ),
-                    dcc.Dropdown(
-                        id="topology-site-index",
-                        options=backend.fragment_options(first_state),
-                        value=first_state.get("topology_site_index"),
-                        placeholder="(first match of selected species, or click in viewer)",
-                        clearable=True,
-                        style={"marginTop": "4px", "marginBottom": "8px"},
+                    html.Div(
+                        [
+                            html.Button(
+                                "Analysis",
+                                id="analysis-panel-toggle",
+                                className="analysis-panel-toggle",
+                                n_clicks=0,
+                                title="Show or hide analysis panel",
+                            ),
+                            html.Div(
+                                [
+                                    html.Div("Analysis", className="analysis-panel-title"),
+                                    html.Div(
+                                        "Topology, score summaries, and future analysis modules.",
+                                        className="analysis-panel-subtitle",
+                                    ),
+                                ],
+                                className="analysis-panel-heading",
+                            ),
+                        ],
+                        className="analysis-panel-header",
                     ),
                     html.Div(
-                        "Display tiling (left panel) and analysis (this panel) "
-                        "are independent: switch the analysed fragment here without "
-                        "changing what is drawn.",
-                        style={"fontSize": "11px", "color": "#666", "marginBottom": "8px"},
-                    ),
-                    dcc.Graph(id="topology-histogram", figure=topology_histogram_figure(first_topology), style={"height": "280px"}),
-                    html.Pre(
-                        id="topology-results",
-                        children=topology_results_markdown(first_topology),
-                        style={"whiteSpace": "pre-wrap", "fontSize": "13px", "fontFamily": "Arial, sans-serif"},
+                        [
+                            html.Section(
+                                [
+                                    html.Div("Topology", className="analysis-section-title"),
+                                    html.Label(
+                                        "Analyze fragment",
+                                        htmlFor="topology-site-index",
+                                        className="analysis-label",
+                                    ),
+                                    dcc.Dropdown(
+                                        id="topology-site-index",
+                                        options=backend.fragment_options(first_state),
+                                        value=first_state.get("topology_site_index"),
+                                        placeholder="(first match of selected species, or click in viewer)",
+                                        clearable=True,
+                                        className="analysis-control",
+                                    ),
+                                    html.Div(
+                                        "Display tiling and analysis are independent: switch the analysed "
+                                        "fragment here without changing what is drawn.",
+                                        className="analysis-help",
+                                    ),
+                                    dcc.Graph(
+                                        id="topology-histogram",
+                                        figure=topology_histogram_figure(first_topology),
+                                        className="analysis-graph",
+                                        style={"height": "260px"},
+                                    ),
+                                    html.Pre(
+                                        id="topology-results",
+                                        children=topology_results_markdown(first_topology),
+                                        className="analysis-results",
+                                    ),
+                                ],
+                                className="analysis-section",
+                            ),
+                        ],
+                        className="analysis-panel-body",
                     ),
                 ],
                 id="right-panel",
+                className="analysis-panel analysis-panel--collapsed",
                 style={
                     "width": "320px",
                     "minWidth": "260px",
@@ -1190,13 +1278,14 @@ def create_app(
         Output("topology-hull-color", "value"),
         Output("fast-rendering-toggle", "value"),
         Output("agent-state-store", "data"),
+        Output("camera-state-store", "data"),
         Input("agent-state-poll", "n_intervals"),
         prevent_initial_call=True,
     )
     def sync_agent_state(_):
         state = backend.pop_pending_state()
         if not state:
-            return (no_update,) * 13
+            return (no_update,) * 14
         return (
             state["structure"],
             state["display_mode"],
@@ -1211,10 +1300,11 @@ def create_app(
             state.get("topology_hull_color", "#7C5CBF"),
             ["fast"] if state.get("fast_rendering", False) else [],
             state,
+            state.get("camera"),
         )
 
     @app.callback(
-        Output("state-sync-sentinel", "children"),
+        Output("agent-state-store", "data", allow_duplicate=True),
         Input("structure-selector", "value"),
         Input("display-mode-selector", "value"),
         Input("display-options", "value"),
@@ -1227,8 +1317,7 @@ def create_app(
         Input("topology-toggle", "value"),
         Input("topology-hull-color", "value"),
         Input("fast-rendering-toggle", "value"),
-        Input("crystal-graph", "relayoutData"),
-        Input("crystal-graph", "clickData"),
+        prevent_initial_call=True,
     )
     def capture_state(
         structure,
@@ -1243,29 +1332,7 @@ def create_app(
         topology_toggle,
         topology_hull_color,
         fast_rendering_toggle,
-        relayout_data,
-        click_data,
     ):
-        camera = None
-        if relayout_data:
-            camera = relayout_data.get("scene.camera") or relayout_data.get("scene", {}).get("camera")
-        explicit_site = None if site_index in ("", None) else int(site_index)
-        if explicit_site is not None or (click_data and click_data.get("points")):
-            resolved_site = backend.resolve_topology_site(
-                state=backend.normalize_state({"structure": structure, "display_mode": display_mode, "display_options": display_options}),
-                structure=structure,
-                explicit_site=explicit_site,
-                species_keys=list(species_keys or []),
-                click_data=click_data,
-            )
-        else:
-            resolved_site = None
-        # Only push the camera into the patch when the latest relayout
-        # actually carried one. Toggling a checkbox fires capture_state
-        # without changing relayoutData, but the previously-stored
-        # camera was getting clobbered by a fresh ``"camera": None``
-        # entry, which is why every Labels / Axes / Hydrogens click
-        # snapped the view back to the structure default.
         patch: dict[str, Any] = {
             "structure": structure,
             "display_mode": display_mode,
@@ -1275,70 +1342,46 @@ def create_app(
             "minor_opacity": minor_opacity,
             "axis_scale": axis_scale,
             "topology_species_keys": list(species_keys or []),
-            "topology_site_index": resolved_site,
+            "topology_site_index": None if site_index in ("", None) else int(site_index),
             "topology_enabled": "enabled" in (topology_toggle or []),
             "topology_hull_color": topology_hull_color or "#7C5CBF",
             "fast_rendering": "fast" in (fast_rendering_toggle or []),
         }
-        if camera:
-            patch["camera"] = camera
         backend.record_state(patch)
-        return ""
+        return backend.get_state()
+
+    @app.callback(
+        Output("camera-state-store", "data", allow_duplicate=True),
+        Input("crystal-graph", "relayoutData"),
+        State("camera-state-store", "data"),
+        prevent_initial_call=True,
+    )
+    def capture_camera(relayout_data, camera_state):
+        camera = _camera_from_relayout_data(
+            relayout_data,
+            camera_state or backend.get_state().get("camera"),
+        )
+        if not camera:
+            return no_update
+        backend.record_state({"camera": camera})
+        return camera
 
     @app.callback(
         Output("crystal-graph", "figure"),
         Output("topology-histogram", "figure"),
         Output("topology-results", "children"),
         Output("structure-summary", "children"),
-        Input("structure-selector", "value"),
-        Input("display-mode-selector", "value"),
-        Input("display-options", "value"),
-        Input("atom-scale-slider", "value"),
-        Input("bond-radius-slider", "value"),
-        Input("minor-opacity-slider", "value"),
-        Input("axis-scale-slider", "value"),
-        Input("topology-species", "value"),
-        Input("topology-site-index", "value"),
-        Input("topology-toggle", "value"),
-        Input("topology-hull-color", "value"),
-        Input("fast-rendering-toggle", "value"),
-        Input("crystal-graph", "clickData"),
         Input("agent-state-store", "data"),
+        State("camera-state-store", "data"),
     )
     def update_view(
-        structure,
-        display_mode,
-        display_options,
-        atom_scale,
-        bond_radius,
-        minor_opacity,
-        axis_scale,
-        species_keys,
-        site_index,
-        topology_toggle,
-        topology_hull_color,
-        fast_rendering_toggle,
-        click_data,
         agent_state,
+        camera_state,
     ):
-        state = backend.normalize_state(
-            {
-                **(agent_state or {}),
-                "structure": structure,
-                "display_mode": display_mode,
-                "display_options": display_options,
-                "atom_scale": atom_scale,
-                "bond_radius": bond_radius,
-                "minor_opacity": minor_opacity,
-                "axis_scale": axis_scale,
-                "topology_species_keys": list(species_keys or []),
-                "topology_site_index": None if site_index in ("", None) else int(site_index),
-                "topology_enabled": "enabled" in (topology_toggle or []),
-                "topology_hull_color": topology_hull_color or "#7C5CBF",
-                "fast_rendering": "fast" in (fast_rendering_toggle or []),
-            }
-        )
-        fig, topology_data = backend.figure_for_state(state, click_data=click_data)
+        state = backend.normalize_state(agent_state or backend.get_state())
+        if camera_state:
+            state["camera"] = camera_state
+        fig, topology_data = backend.figure_for_state(state)
         summary = _structure_summary(backend.scene_for_state(state))
         return fig, topology_histogram_figure(topology_data), topology_results_markdown(topology_data), summary
 
@@ -1357,7 +1400,78 @@ def create_app(
         return f"Saved preset: {result['path']}"
 
     register_api(app, backend)
+    if str(os.environ.get("MATTERVIS_PREWARM", "0")).lower() in {"1", "true", "yes", "on"}:
+        _start_cache_prewarm(backend)
     return app
+
+
+def _start_cache_prewarm(backend: ViewerBackend) -> None:
+    """Warm expensive scene / mesh caches after the Dash app is ready.
+
+    Structure and display-scope switching feels slow mostly on the first
+    visit to a dense unit cell: building the scene, sphere/cylinder Mesh3d
+    arrays, and Plotly trace dicts can cost several seconds for PEP.  The
+    renderer already has warm-path caches; this background pass simply fills
+    them for the structures that were explicitly loaded at startup or via
+    upload, without changing the current UI state.
+    """
+
+    def _worker():
+        # Let the initial server-side figure finish before trickling through
+        # heavier display scopes. The prewarm thread is opt-in via
+        # MATTERVIS_PREWARM=1 so it cannot steal CPU from the default first
+        # interaction path.
+        ready = getattr(backend, "_first_figure_ready", None)
+        if ready is not None:
+            ready.wait(timeout=1.5)
+        else:
+            time.sleep(1.5)
+        names = list(backend.bundles.keys())
+        for name in names:
+            try:
+                bundle = backend.get_bundle(name)
+            except Exception:
+                continue
+            defaults = backend.default_state(name)
+            for display_mode in ("formula_unit", "asymmetric_unit", "unit_cell"):
+                old_scene = bundle.scene
+                try:
+                    scene = build_bundle_scene(
+                        bundle,
+                        display_mode=display_mode,
+                        show_hydrogen=False,
+                        preset=backend.preset,
+                    )
+                    style = dict(scene.get("style", {}))
+                    style.update(
+                        style_from_controls(
+                            defaults["atom_scale"],
+                            defaults["bond_radius"],
+                            defaults["minor_opacity"],
+                            defaults["axis_scale"],
+                            defaults["display_options"],
+                        )
+                    )
+                    style["display_mode"] = display_mode
+                    style["fast_rendering"] = bool(defaults.get("fast_rendering", False))
+                    # Warm atom/bond mesh payloads first. Topology overlays are
+                    # cached on demand because selected species/site can vary.
+                    style["topology_enabled"] = False
+                    build_figure(scene, style, topology_data=None)
+                    # Also warm the default topology path for this display
+                    # scope, then restore the visible bundle.scene pointer so
+                    # metadata for the currently selected view does not jump
+                    # around while the background thread is working.
+                    state = dict(defaults)
+                    state["display_mode"] = display_mode
+                    backend.figure_for_state(state)
+                except Exception:
+                    continue
+                finally:
+                    bundle.scene = old_scene
+
+    thread = threading.Thread(target=_worker, name="mattervis-cache-prewarm", daemon=True)
+    thread.start()
 
 
 def _build_parser():

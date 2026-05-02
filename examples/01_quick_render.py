@@ -44,7 +44,7 @@ def main() -> None:
     )
 
     fig = build_figure(cell_scene, style)
-    fig.update_layout(title=f"{bundle.title}  ·  {len(cell_scene['draw_atoms'])} atoms drawn")
+    fig.update_layout(title=dict(text=f"{bundle.title}  ·  {len(cell_scene['draw_atoms'])} atoms drawn", x=0.5))
 
     png = OUTPUT_DIR / "01_quick_render.png"
     html = OUTPUT_DIR / "01_quick_render.html"

@@ -14,6 +14,137 @@
   box-sizing: border-box;
 }
 
+.analysis-panel {
+  font-family: Arial, Helvetica, sans-serif;
+  color: #1f2937;
+  transition: width 160ms ease, min-width 160ms ease, padding 160ms ease;
+}
+
+.analysis-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.analysis-panel-toggle {
+  flex: 0 0 auto;
+  border: 1px solid #c7ccd5;
+  border-radius: 7px;
+  background: #ffffff;
+  color: #24324a;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 8px 10px;
+}
+
+.analysis-panel-toggle:hover {
+  background: #f3f6fb;
+  border-color: #9aa7bb;
+}
+
+.analysis-panel-heading {
+  min-width: 0;
+}
+
+.analysis-panel-title {
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.2;
+  margin: 0;
+}
+
+.analysis-panel-subtitle {
+  color: #667085;
+  font-size: 12px;
+  line-height: 1.35;
+  margin-top: 3px;
+}
+
+.analysis-section {
+  border-top: 1px solid #e4e7ec;
+  padding-top: 12px;
+}
+
+.analysis-section-title {
+  color: #344054;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.25;
+  margin-bottom: 10px;
+}
+
+.analysis-label {
+  color: #344054;
+  display: block;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.3;
+  margin-bottom: 5px;
+}
+
+.analysis-control {
+  color: #1f2937;
+  font-family: Arial, Helvetica, sans-serif;
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+
+.analysis-help {
+  color: #667085;
+  font-size: 12px;
+  line-height: 1.4;
+  margin-bottom: 10px;
+}
+
+.analysis-graph {
+  margin: 2px 0 10px;
+}
+
+.analysis-results {
+  background: #ffffff;
+  border: 1px solid #e4e7ec;
+  border-radius: 8px;
+  color: #1f2937;
+  font-family: Arial, Helvetica, sans-serif;
+  font-size: 13px;
+  line-height: 1.45;
+  margin: 0;
+  padding: 10px 12px;
+  white-space: pre-wrap;
+}
+
+.analysis-panel.analysis-panel--collapsed {
+  width: 44px !important;
+  min-width: 44px !important;
+  max-width: 44px !important;
+  padding: 8px 6px !important;
+  overflow: hidden !important;
+}
+
+.analysis-panel.analysis-panel--collapsed .analysis-panel-header {
+  align-items: center;
+  flex-direction: column;
+  gap: 0;
+  height: 100%;
+  margin: 0;
+}
+
+.analysis-panel.analysis-panel--collapsed .analysis-panel-toggle {
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  min-height: 96px;
+  padding: 10px 6px;
+}
+
+.analysis-panel.analysis-panel--collapsed .analysis-panel-heading,
+.analysis-panel.analysis-panel--collapsed .analysis-panel-body {
+  display: none;
+}
+
 body.panel-resizing,
 body.panel-resizing * {
   cursor: col-resize !important;
