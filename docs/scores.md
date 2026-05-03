@@ -14,7 +14,7 @@ fragment inside `cutoff` Å and sorts them by distance.
 from crystal_viewer.loader import build_loaded_crystal
 from crystal_viewer.topology import analyze_topology
 
-bundle = build_loaded_crystal(name="DAP-4", cif_path="examples/data/DAP-4.cif")
+bundle = build_loaded_crystal(name="DAP-4", cif_path="scripts/data/DAP-4.cif")
 # The first A-site fragment in DAP-4 is at index 8; tune cutoff to your lattice.
 result = analyze_topology(bundle, center_index=8, cutoff=8.0)
 print(result.keys())
@@ -205,8 +205,8 @@ shown.
 
 ## Example output (DAP-4, first A-site cation)
 
-`python examples/02_coordination_analysis.py` writes
-`examples/_outputs/02_coordination_summary.json` with an abridged version of
+`python scripts/02_coordination_analysis.py` writes
+`scripts/_outputs/02_coordination_summary.json` with an abridged version of
 the dict:
 
 ```json

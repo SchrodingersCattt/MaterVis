@@ -14,37 +14,89 @@ except Exception:  # pragma: no cover - optional dependency
 
 def register_api(dash_app, backend) -> None:
     server = dash_app.server
-    blueprint = Blueprint("crystal_viewer_api", __name__, url_prefix="/api/v1")
 
-    @blueprint.get("/state")
+    def _scene_id_from_request() -> str | None:
+        payload = request.get_json(silent=True) if request.method not in ("GET", "HEAD") else None
+        return request.args.get("scene_id") or ((payload or {}).get("scene_id") if isinstance(payload, dict) else None)
+
+    v2 = Blueprint("crystal_viewer_api_v2", __name__, url_prefix="/api/v2")
+
+    @v2.get("/scenes")
+    def scenes_list():
+        return jsonify({"active_id": backend.active_scene_id(), "scenes": backend.scene_options()})
+
+    @v2.post("/scenes")
+    def scenes_create():
+        payload = request.get_json(force=True, silent=True) or {}
+        return jsonify(
+            backend.create_scene(
+                structure=payload.get("structure") or payload.get("structure_name"),
+                label=payload.get("label"),
+                state=payload.get("state"),
+            )
+        )
+
+    @v2.patch("/scenes/<scene_id>")
+    def scenes_patch(scene_id: str):
+        payload = request.get_json(force=True, silent=True) or {}
+        return jsonify(backend.update_scene(scene_id, payload))
+
+    @v2.delete("/scenes/<scene_id>")
+    def scenes_delete(scene_id: str):
+        return jsonify(backend.delete_scene(scene_id))
+
+    @v2.post("/scenes/<scene_id>/duplicate")
+    def scenes_duplicate(scene_id: str):
+        payload = request.get_json(force=True, silent=True) or {}
+        return jsonify(backend.duplicate_scene(scene_id, label=payload.get("label")))
+
+    @v2.post("/scenes/reorder")
+    def scenes_reorder():
+        payload = request.get_json(force=True, silent=True) or {}
+        return jsonify({"order": backend.reorder_scenes(payload.get("order") or [])})
+
+    @v2.get("/scenes/active")
+    def scenes_active_get():
+        scene_id = backend.active_scene_id()
+        return jsonify({"active_id": scene_id, "state": backend.get_state(scene_id) if scene_id else None})
+
+    @v2.post("/scenes/active")
+    def scenes_active_post():
+        payload = request.get_json(force=True, silent=True) or {}
+        scene_id = payload.get("scene_id") or payload.get("id")
+        if not scene_id:
+            return jsonify({"error": "scene_id is required"}), 400
+        return jsonify(backend.set_active_scene(scene_id))
+
+    @v2.get("/state")
     def get_state():
-        return jsonify(backend.get_state())
+        return jsonify(backend.get_state(request.args.get("scene_id")))
 
-    @blueprint.post("/state")
+    @v2.post("/state")
     def post_state():
         payload = request.get_json(force=True, silent=True) or {}
-        return jsonify(backend.patch_state(payload))
+        return jsonify(backend.patch_state(payload, scene_id=_scene_id_from_request()))
 
-    @blueprint.get("/camera")
+    @v2.get("/camera")
     def get_camera():
-        return jsonify({"camera": backend.get_camera()})
+        return jsonify({"camera": backend.get_camera(scene_id=request.args.get("scene_id"))})
 
-    @blueprint.post("/camera")
+    @v2.post("/camera")
     def post_camera():
         payload = request.get_json(force=True, silent=True) or {}
         camera = payload.get("camera", payload)
-        return jsonify({"camera": backend.set_camera(camera)})
+        return jsonify({"camera": backend.set_camera(camera, scene_id=_scene_id_from_request())})
 
-    @blueprint.post("/camera/action")
+    @v2.post("/camera/action")
     def post_camera_action():
         payload = request.get_json(force=True, silent=True) or {}
         action = payload.get("action")
         if not action:
             return jsonify({"error": "action is required"}), 400
-        rest = {key: value for key, value in payload.items() if key != "action"}
-        return jsonify({"camera": backend.camera_action(action, **rest)})
+        rest = {key: value for key, value in payload.items() if key not in ("action", "scene_id")}
+        return jsonify({"camera": backend.camera_action(action, scene_id=_scene_id_from_request(), **rest)})
 
-    @blueprint.post("/upload")
+    @v2.post("/upload")
     def upload_cif():
         if "file" not in request.files:
             return jsonify({"error": "missing multipart file field 'file'"}), 400
@@ -55,16 +107,92 @@ def register_api(dash_app, backend) -> None:
         bundle = backend.add_uploaded_file_bytes(content, file.filename)
         return jsonify(bundle.metadata())
 
-    @blueprint.get("/structures")
+    @v2.get("/structures")
     def structures():
         return jsonify({"structures": backend.list_structures()})
 
-    @blueprint.get("/scene/<name>")
+    @v2.get("/scene/<name>")
     def scene(name: str):
         return jsonify(backend.get_scene_json(name))
 
-    @blueprint.post("/topology")
+    @v2.post("/topology")
     def topology():
+        payload = request.get_json(force=True, silent=True) or {}
+        state = backend.get_state(_scene_id_from_request())
+        structure = payload.get("structure") or state.get("structure")
+        center_index = payload.get("center_index")
+        cutoff = float(payload.get("cutoff", 10.0))
+        if center_index is None:
+            return jsonify({"error": "center_index is required"}), 400
+        return jsonify(backend.query_topology(structure=structure, center_index=int(center_index), cutoff=cutoff, scene_id=_scene_id_from_request()))
+
+    @v2.get("/screenshot")
+    def screenshot():
+        png = backend.render_current_png(scene_id=request.args.get("scene_id"))
+        return Response(png, mimetype="image/png")
+
+    @v2.post("/preset/save")
+    def preset_save():
+        payload = request.get_json(force=True, silent=True) or {}
+        path = payload.get("path")
+        return jsonify(backend.save_preset(path=path))
+
+    @v2.post("/preset/load")
+    def preset_load():
+        payload = request.get_json(force=True, silent=True) or {}
+        path = payload.get("path")
+        return jsonify(backend.load_preset_from_path(path))
+
+    @v2.post("/export")
+    def export_static():
+        payload = request.get_json(force=True, silent=True) or {}
+        return jsonify(backend.export_static(output_path=payload.get("output_path")))
+
+    server.register_blueprint(v2)
+
+    v1 = Blueprint("crystal_viewer_api_v1", __name__, url_prefix="/api/v1")
+
+    @v1.get("/state")
+    def v1_get_state():
+        return jsonify(backend.get_state())
+
+    @v1.post("/state")
+    def v1_post_state():
+        payload = request.get_json(force=True, silent=True) or {}
+        return jsonify(backend.patch_state(payload))
+
+    @v1.get("/camera")
+    def v1_get_camera():
+        return jsonify({"camera": backend.get_camera()})
+
+    @v1.post("/camera")
+    def v1_post_camera():
+        payload = request.get_json(force=True, silent=True) or {}
+        return jsonify({"camera": backend.set_camera(payload.get("camera", payload))})
+
+    @v1.post("/camera/action")
+    def v1_post_camera_action():
+        payload = request.get_json(force=True, silent=True) or {}
+        action = payload.get("action")
+        if not action:
+            return jsonify({"error": "action is required"}), 400
+        rest = {key: value for key, value in payload.items() if key != "action"}
+        return jsonify({"camera": backend.camera_action(action, **rest)})
+
+    @v1.post("/upload")
+    def v1_upload_cif():
+        return upload_cif()
+
+    @v1.get("/structures")
+    def v1_structures():
+        return structures()
+
+    @v1.get("/scene/<name>")
+    def v1_scene(name: str):
+        return scene(name)
+
+    @v1.post("/topology")
+    def v1_topology():
         payload = request.get_json(force=True, silent=True) or {}
         structure = payload.get("structure") or backend.get_state().get("structure")
         center_index = payload.get("center_index")
@@ -73,36 +201,30 @@ def register_api(dash_app, backend) -> None:
             return jsonify({"error": "center_index is required"}), 400
         return jsonify(backend.query_topology(structure=structure, center_index=int(center_index), cutoff=cutoff))
 
-    @blueprint.get("/screenshot")
-    def screenshot():
-        png = backend.render_current_png()
-        return Response(png, mimetype="image/png")
+    @v1.get("/screenshot")
+    def v1_screenshot():
+        return screenshot()
 
-    @blueprint.post("/preset/save")
-    def preset_save():
-        payload = request.get_json(force=True, silent=True) or {}
-        path = payload.get("path")
-        return jsonify(backend.save_preset(path=path))
+    @v1.post("/preset/save")
+    def v1_preset_save():
+        return preset_save()
 
-    @blueprint.post("/preset/load")
-    def preset_load():
-        payload = request.get_json(force=True, silent=True) or {}
-        path = payload.get("path")
-        return jsonify(backend.load_preset_from_path(path))
+    @v1.post("/preset/load")
+    def v1_preset_load():
+        return preset_load()
 
-    @blueprint.post("/export")
-    def export_static():
-        payload = request.get_json(force=True, silent=True) or {}
-        return jsonify(backend.export_static(output_path=payload.get("output_path")))
+    @v1.post("/export")
+    def v1_export_static():
+        return export_static()
 
-    server.register_blueprint(blueprint)
+    server.register_blueprint(v1)
 
     if Sock is None:
         return
 
     sock = Sock(server)
 
-    @sock.route("/api/v1/ws")
+    @sock.route("/api/v2/ws")
     def ws_state(socket):
         last_version = -1
         while True:
@@ -123,3 +245,5 @@ def register_api(dash_app, backend) -> None:
                     payload = {"type": "raw", "message": message}
                 if payload.get("type") == "set_state":
                     backend.patch_state(payload.get("payload", {}))
+
+    sock.route("/api/v1/ws")(ws_state)

@@ -2,15 +2,15 @@
 
 Run from the repository root:
 
-    python examples/05_app_and_api.py
+    python scripts/05_app_and_api.py
 
 The script:
 
 1. Starts ``crystal_viewer.create_app`` with the bundled DAP-4 CIF preloaded.
-2. Hits ``GET  /api/v1/state``           - the live viewer state.
-3. Hits ``POST /api/v1/topology``        - coordination analysis for fragment 0.
-4. Hits ``POST /api/v1/camera/action``   - rotates the camera.
-5. Hits ``GET  /api/v1/screenshot``      - captures the resulting view as PNG.
+2. Hits ``GET  /api/v2/state``           - the live viewer state.
+3. Hits ``POST /api/v2/topology``        - coordination analysis for fragment 0.
+4. Hits ``POST /api/v2/camera/action``   - rotates the camera.
+5. Hits ``GET  /api/v2/screenshot``      - captures the resulting view as PNG.
 
 The app keeps running for ~3 seconds after the screenshot so you can
 ``open http://127.0.0.1:8051`` (or whatever port was free) to interact with
@@ -60,7 +60,7 @@ def _api(method: str, base: str, path: str, payload: dict | None = None) -> dict
 
 
 def _api_screenshot(base: str, dest: Path) -> Path:
-    with urlrequest.urlopen(f"{base}/api/v1/screenshot", timeout=30) as resp:
+    with urlrequest.urlopen(f"{base}/api/v2/screenshot", timeout=30) as resp:
         dest.write_bytes(resp.read())
     return dest
 
@@ -93,7 +93,7 @@ def main() -> None:
 
     for _ in range(50):
         try:
-            urlrequest.urlopen(f"{base}/api/v1/state", timeout=1).read()
+            urlrequest.urlopen(f"{base}/api/v2/state", timeout=1).read()
             break
         except Exception:
             time.sleep(0.2)
@@ -102,7 +102,7 @@ def main() -> None:
 
     print(f"App live at {base}")
 
-    state = _api("GET", base, "/api/v1/state")
+    state = _api("GET", base, "/api/v2/state")
     print(f"Initial structure: {state['structure']}  display_options={state['display_options']}")
 
     a_indices = [f["index"] for f in bundle.topology_fragment_table if f["type"] == "A"]
@@ -110,7 +110,7 @@ def main() -> None:
         raise SystemExit("No A-site fragments found.")
     # The backend honours `center_index` only when it matches the current
     # `topology_fragment_type`; we set that to "A" above via patch_state.
-    topology = _api("POST", base, "/api/v1/topology", {
+    topology = _api("POST", base, "/api/v2/topology", {
         "structure": "DAP-4",
         "center_index": a_indices[0],
         "cutoff": 8.0,
@@ -120,7 +120,7 @@ def main() -> None:
           f"CN={topology['coordination_number']}  "
           f"best_ideal={best['name'] if best else 'n/a'}")
 
-    _api("POST", base, "/api/v1/camera/action", {
+    _api("POST", base, "/api/v2/camera/action", {
         "action": "orbit",
         "yaw_deg": 25,
         "pitch_deg": -8,

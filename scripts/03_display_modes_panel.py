@@ -2,7 +2,7 @@
 
 Run from the repository root:
 
-    python examples/03_display_modes_panel.py
+    python scripts/03_display_modes_panel.py
 
 Produces ``03_display_modes.png`` with three subplots:
 

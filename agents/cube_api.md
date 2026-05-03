@@ -86,6 +86,6 @@ These are stable across versions; rely on them.
 
 ## Worked example
 
-See `examples/06_cp2k_cube_orbital.py` for an end-to-end recipe
+See `scripts/06_cp2k_cube_orbital.py` for an end-to-end recipe
 covering CP2K cube I/O, MolCrysKit-based PBC unwrapping, tiling +
 mesh filtering, opaque orbital panels, and paper-coord compass.

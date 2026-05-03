@@ -10,7 +10,7 @@ from crystal_viewer.app import DEFAULT_PRESET_PATH, ViewerBackend
 
 
 ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_CIF = ROOT / "examples" / "data" / "DAP-4.cif"
+DEFAULT_CIF = ROOT / "scripts" / "data" / "DAP-4.cif"
 
 
 def _load_backend(cif_path: Path) -> ViewerBackend:

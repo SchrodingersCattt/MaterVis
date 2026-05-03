@@ -21,7 +21,7 @@ from crystal_viewer.topology import (
 
 
 ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_CIF = ROOT / "examples" / "data" / "DAP-4.cif"
+DEFAULT_CIF = ROOT / "scripts" / "data" / "DAP-4.cif"
 
 
 def _time_call(fn: Callable[[], Any], *, repeat: int = 5, warmup: int = 1) -> dict[str, Any]:

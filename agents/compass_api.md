@@ -65,6 +65,6 @@ your needs.
 
 ## Worked example
 
-See `examples/06_cp2k_cube_orbital.py` for a/b/c compass anchored
+See `scripts/06_cp2k_cube_orbital.py` for a/b/c compass anchored
 below each panel's 3D scene domain, sized in pixel units relative to
 the figure size.

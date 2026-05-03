@@ -2,9 +2,9 @@
 
 Run from the repository root:
 
-    python examples/01_quick_render.py
+    python scripts/01_quick_render.py
 
-Outputs are written next to the script under ``examples/_outputs/``.
+Outputs are written next to the script under ``scripts/_outputs/``.
 """
 from __future__ import annotations
 

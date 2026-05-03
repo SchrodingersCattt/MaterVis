@@ -54,6 +54,15 @@ same length per pixel.
 Beyond the Dash-driven defaults, `crystal_viewer.renderer.build_figure`
 honours:
 
+- `material` — `mesh` for real Mesh3d atoms/bonds, or `flat` for
+  billboard-style traces.
+- `style` — `ball`, `ball_stick`, `stick`, `ortep`, or `wireframe`.
+- `disorder` — `opacity`, `dashed_bonds`, `outline_rings`,
+  `color_shift`, or `none`. This is independent from `material` and
+  `style`; disorder no longer implies transparent atoms.
+- Legacy aliases: `fast_rendering=True` maps to `material="flat"`;
+  `minor_wireframe=True` maps to `disorder="outline_rings"`; and
+  `minor_opacity` only changes visibility when `disorder="opacity"`.
 - `show_title` — set to `False` to suppress the Plotly panel title
   when the caller composes panels externally (e.g. with Matplotlib
   subplot titles or `make_subplots`).
@@ -66,6 +75,6 @@ honours:
 
 ## Worked example
 
-See `examples/04_static_publication.py` for an end-to-end recipe that
+See `scripts/04_static_publication.py` for an end-to-end recipe that
 combines `build_scene_from_cif` + `uniform_viewport` + `build_figure` +
 `export_static` into a publication PDF.

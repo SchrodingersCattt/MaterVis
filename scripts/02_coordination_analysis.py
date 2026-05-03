@@ -2,7 +2,7 @@
 
 Run from the repository root:
 
-    python examples/02_coordination_analysis.py
+    python scripts/02_coordination_analysis.py
 
 For DAP-4 we ask: which X (perchlorate) anions sit closest to the first A-site
 diaminopropane cation? The script writes:

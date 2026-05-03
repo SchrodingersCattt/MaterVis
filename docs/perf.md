@@ -17,7 +17,7 @@ python -m crystal_viewer.perf.bench --repeat 3 --json
 python -m crystal_viewer.perf.profile_app --output /tmp/mattervis-profile-baseline.txt
 ```
 
-Test structure: `examples/data/DAP-4.cif` (`atom_count_unit_cell=192`,
+Test structure: `scripts/data/DAP-4.cif` (`atom_count_unit_cell=192`,
 `fragment_count=40`).
 
 | Benchmark | Mean (s) | Median (s) | Notes |

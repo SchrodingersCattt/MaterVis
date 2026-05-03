@@ -15,12 +15,14 @@ catalog.local.json
 
 uploads/
 exports/
-examples/_outputs/
-examples/data/HPEP.cif
-examples/data/MPEP.cif
-examples/data/PEP.cif
-examples/data/SY.cif
+scripts/_outputs/
+scripts/data/HPEP.cif
+scripts/data/MPEP.cif
+scripts/data/PEP.cif
+scripts/data/SY.cif
 scripts/_data/
 
 .DS_Store
 Thumbs.db
+
+scripts/private/
