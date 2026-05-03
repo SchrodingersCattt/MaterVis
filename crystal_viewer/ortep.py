@@ -9,6 +9,8 @@ import plotly.graph_objects as go
 
 CHI2_3D_50 = 2.3659738843753377
 CHI2_2D_50 = 1.3862943611198906
+DEFAULT_ORTEP_UISO = 0.04
+DEFAULT_HYDROGEN_ORTEP_UISO = 0.012
 
 
 def _probability_scale(probability: float, *, dimensions: int) -> float:
@@ -48,7 +50,7 @@ def _normal_ppf(p: float) -> float:
 
 def _as_u_matrix(U: Iterable[Iterable[float]] | None, *, uiso: float | None = None) -> np.ndarray:
     if U is None:
-        u = 0.04 if uiso is None else max(float(uiso), 1e-6)
+        u = DEFAULT_ORTEP_UISO if uiso is None else max(float(uiso), 1e-6)
         return np.eye(3, dtype=float) * u
     mat = np.asarray(U, dtype=float)
     if mat.shape != (3, 3):
@@ -149,8 +151,18 @@ def ortep_octant_shading(center, U, view_dir, *, probability: float = 0.5, uiso:
     return octants
 
 
+def _default_uiso_for_atom(atom: dict) -> float:
+    elem = str(atom.get("elem") or atom.get("element") or "").strip().capitalize()
+    if elem == "H":
+        return DEFAULT_HYDROGEN_ORTEP_UISO
+    return DEFAULT_ORTEP_UISO
+
+
 def _atom_u(atom: dict):
-    return atom.get("U"), float(atom.get("uiso", 0.04) or 0.04)
+    uiso = atom.get("uiso")
+    if uiso is None:
+        uiso = _default_uiso_for_atom(atom)
+    return atom.get("U"), float(uiso or _default_uiso_for_atom(atom))
 
 
 def ortep_atom_mesh_traces(scene: dict, style: dict):
