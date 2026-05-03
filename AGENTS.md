@@ -151,7 +151,7 @@ both files.
 
 ## Tests, lint, build
 
-- Unit tests: `pytest crystal_viewer/`.
+- Unit tests: `pytest tests/`.
 - Examples regression: `python scripts/<n>_*.py` regenerates the
   paired figure in `scripts/_outputs/`. Visually inspect before
   merging.

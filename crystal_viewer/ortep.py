@@ -154,15 +154,70 @@ def _atom_u(atom: dict):
 
 
 def ortep_atom_mesh_traces(scene: dict, style: dict):
-    traces = []
+    """Batch all ORTEP ellipsoids that share a (color, opacity) group
+    into a single ``Mesh3d`` trace.
+
+    Plotly issues one WebGL draw call per Mesh3d, and the React/Dash
+    update path validates and serialises each trace independently.
+    Emitting one trace per atom (the original implementation) was
+    fine for a 24-atom asymmetric unit but turned a 200-atom DAP-4
+    unit cell into ~200+ traces -- ~2 MB of figure JSON before the
+    topology overlay even joins, with a visible per-frame stutter
+    in the WebGL renderer. Batching by colour collapses this to one
+    trace per element (~5-7 traces total) at no visual cost: the
+    individual ellipsoids stay disjoint inside the merged mesh
+    because every atom contributes a closed sphere of triangles.
+    """
+
     probability = float(style.get("ortep_probability", 0.5))
+    show_minor_only = bool(style.get("show_minor_only", False))
+    minor_opacity = float(style.get("minor_opacity", 0.35))
+    major_opacity = float(style.get("major_opacity", 1.0))
+    fade_minor = style.get("disorder") == "opacity"
+
+    # Subdivision budget mirrors ``_atom_mesh_traces``. ORTEP scenes
+    # are typically denser than ball-stick (every atom carries an
+    # ellipsoid plus principal-axis dashes) so we step down a tier.
+    n_atoms = sum(1 for a in scene.get("draw_atoms", []) if not show_minor_only or a.get("is_minor"))
+    if n_atoms > 400:
+        lat_steps, lon_steps = 4, 8
+    elif n_atoms > 150:
+        lat_steps, lon_steps = 5, 10
+    elif n_atoms > 60:
+        lat_steps, lon_steps = 7, 12
+    else:
+        lat_steps, lon_steps = 10, 18
+
+    # group_key = (color, opacity). Same color but different opacity
+    # (because of the half-occupied-disorder fade) needs distinct
+    # traces so we don't collapse two visually different sets.
+    groups: dict[tuple[str, float], dict] = {}
     for atom in scene.get("draw_atoms", []):
-        if style.get("show_minor_only", False) and not atom.get("is_minor"):
+        if show_minor_only and not atom.get("is_minor"):
             continue
-        U, uiso = _atom_u(atom)
-        verts, tris = ortep_mesh3d(atom["cart"], U, probability=probability, uiso=uiso)
         is_minor = bool(atom.get("is_minor"))
-        opacity = float(style.get("minor_opacity", 0.35)) if is_minor and style.get("disorder") == "opacity" else float(style.get("major_opacity", 1.0))
+        opacity = minor_opacity if (is_minor and fade_minor) else major_opacity
+        color = atom.get("color", "#808080")
+        key = (color, opacity)
+        bucket = groups.setdefault(key, {"verts": [], "tris": [], "vert_offset": 0})
+        U, uiso = _atom_u(atom)
+        verts, tris = ortep_mesh3d(
+            atom["cart"], U,
+            probability=probability,
+            lat_steps=lat_steps,
+            lon_steps=lon_steps,
+            uiso=uiso,
+        )
+        bucket["verts"].append(verts)
+        bucket["tris"].append(tris + bucket["vert_offset"])
+        bucket["vert_offset"] += len(verts)
+
+    traces = []
+    for (color, opacity), bucket in groups.items():
+        if not bucket["verts"]:
+            continue
+        verts = np.concatenate(bucket["verts"], axis=0)
+        tris = np.concatenate(bucket["tris"], axis=0)
         traces.append(
             go.Mesh3d(
                 x=verts[:, 0],
@@ -171,9 +226,9 @@ def ortep_atom_mesh_traces(scene: dict, style: dict):
                 i=tris[:, 0],
                 j=tris[:, 1],
                 k=tris[:, 2],
-                color=atom.get("color", "#808080"),
+                color=color,
                 opacity=opacity,
-                name=f"{atom.get('label', atom.get('elem', 'atom'))} ORTEP",
+                name=f"{color} ORTEP",
                 hoverinfo="skip",
                 showlegend=False,
                 flatshading=False,

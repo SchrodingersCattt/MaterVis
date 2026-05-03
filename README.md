@@ -96,6 +96,33 @@ python -m crystal_viewer.app --host 0.0.0.0 --port 50001 \
 If the URL still ERR_CONNECTION_REFUSED, port `50001` is already taken on
 that container -- pick another from the `50001-50005` window.
 
+### Open the page in a real browser, not an embedded webview
+
+Cursor's *Simple Browser*, VS Code's *preview panel* and similar
+Electron-hosted webviews dispatch click events at the DOM level but
+do not always propagate them through React 16's synthetic event
+system that Dash binds onto. The visible failure mode is brutal:
+**every checkbox / dropdown / slider appears to "click" but nothing
+happens** -- the figure never updates, the network tab is silent
+(no `/_dash-update-component` POST is ever sent), and the user
+concludes the app is broken.
+
+The viewer auto-detects this case by sniffing the
+`User-Agent` and renders a sticky red banner at the top of the page
+with a one-click *Copy URL* button. Paste the URL into Chrome, Edge,
+Firefox or Safari and every control will start firing as expected.
+
+A built-in wire-tap strip is also available behind the
+`?diag=1` query parameter -- it shows live counts of clicks, Dash
+POSTs and JS errors so you can tell at a glance whether a "no
+response" report is a DOM problem (no clicks), an event-delegation
+problem (clicks but no POST), or a server problem (POST but no OK).
+
+For server-side debugging the same information is available via
+`MATTERVIS_AUDIT=1 python -m crystal_viewer.app ...`, which prints a
+one-line summary of every non-poll callback (changedPropIds,
+duration, payload size, originating IP / User-Agent).
+
 See [`AGENTS.md`](AGENTS.md) for every REST / WebSocket endpoint and the full
 set of stable UI element IDs.
 
