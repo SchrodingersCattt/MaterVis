@@ -36,30 +36,44 @@ def test_ortep_traces_include_mesh_and_optional_axes():
 def test_ortep_fallback_uiso_shrinks_hydrogen():
     _, h_uiso = _atom_u({"elem": "H"})
     _, c_uiso = _atom_u({"elem": "C"})
-    _, explicit_h_uiso = _atom_u({"elem": "H", "uiso": DEFAULT_ORTEP_UISO})
 
+    # Default fallback (no Uiso provided) gives a sensibly small
+    # hydrogen and a larger heavy-atom default.
     assert h_uiso == DEFAULT_HYDROGEN_ORTEP_UISO
     assert h_uiso < c_uiso
-    assert explicit_h_uiso == DEFAULT_ORTEP_UISO
+
+    # Hydrogen sees a per-element ceiling that is tighter than the
+    # generic heavy-atom default, so passing the heavy-atom default
+    # to a hydrogen must be clipped.
+    _, explicit_h_uiso = _atom_u({"elem": "H", "uiso": DEFAULT_ORTEP_UISO})
+    assert explicit_h_uiso == MAX_ORTEP_UISO_BY_ELEMENT["H"]
 
 
 def test_ortep_caps_disorder_inflated_uiso():
     """Some CIFs encode disorder by inflating Uiso instead of writing
     proper PART/disorder records. The renderer must clamp those values
     so a single H8/H21-style atom doesn't dominate the scene as a giant
-    white blob.
+    white blob, and the clamped H must end up *visually identical* in
+    size to a "well-behaved" ordered H in the same scene -- otherwise
+    the user reads the inflated-Uiso atom as still abnormally large.
     """
 
     # NH4 H atoms in DAP-4-style CIFs ship with Uiso = 0.20-0.25.
     _, clamped_h = _atom_u({"elem": "H", "uiso": 0.25})
+    _, ordered_h = _atom_u({"elem": "H", "uiso": 0.025})
     _, clamped_heavy = _atom_u({"elem": "C", "uiso": 0.50})
 
     assert clamped_h == MAX_ORTEP_UISO_BY_ELEMENT["H"]
     assert clamped_heavy == DEFAULT_MAX_ORTEP_UISO
 
-    # A reasonable explicit Uiso must pass through unchanged.
-    _, normal_h = _atom_u({"elem": "H", "uiso": 0.025})
-    assert normal_h == 0.025
+    # The whole point of the cap: a disordered NH4 H must not render
+    # any larger than an ordinary C-H hydrogen.
+    assert clamped_h <= ordered_h or abs(clamped_h - ordered_h) < 1e-9
+
+    # A small explicit Uiso (typical for refined ordered H) passes
+    # through unchanged.
+    _, tiny_h = _atom_u({"elem": "H", "uiso": 0.017})
+    assert tiny_h == 0.017
 
 
 def test_ortep_caps_anisotropic_u_eigenvalues():

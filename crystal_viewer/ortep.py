@@ -22,8 +22,15 @@ DEFAULT_HYDROGEN_ORTEP_UISO = 0.012
 # temperature thermal motion. We adopt the same convention. The cap
 # only affects rendering; the underlying scene/CIF data is untouched.
 MAX_ORTEP_UISO_BY_ELEMENT = {
-    "H": 0.05,
-    "D": 0.05,
+    # Hydrogen cap is intentionally tight: a typical "well-behaved"
+    # X-ray hydrogen sits at Uiso ~ 0.02-0.03; anything larger is
+    # almost always a disorder placeholder. Capping at 0.025 makes
+    # disordered ammonium / water hydrogens render at the same size
+    # as ordered C-H atoms in the same scene -- which is what users
+    # expect. The "this site is disordered" cue belongs on a
+    # separate axis (outline rings, opacity), not on ellipsoid size.
+    "H": 0.025,
+    "D": 0.025,
 }
 DEFAULT_MAX_ORTEP_UISO = 0.08
 
