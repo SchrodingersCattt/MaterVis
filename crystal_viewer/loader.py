@@ -10,7 +10,9 @@ from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any, Dict, Iterable, Optional
 
+import networkx as nx
 import numpy as np
+from molcrys_kit.utils.geometry import unwrap_positions_along_bonds
 
 from .presets import get_default_catalog, workspace_root
 from . import molcrys_bridge
@@ -33,6 +35,8 @@ class LoadedCrystal:
     crystal: Any | None = None
     molcrys_analysis: Any | None = None
     formula_unit_atoms: list[dict[str, Any]] = field(default_factory=list)
+    unwrapped_atoms: list[dict[str, Any]] = field(default_factory=list)
+    unwrap_overflow: list[list[int]] = field(default_factory=list)
     fragment_table: list[dict[str, Any]] = field(default_factory=list)
     topology_fragment_table: list[dict[str, Any]] = field(default_factory=list)
     fragment_table_cache: dict[tuple[Any, ...], tuple[list[dict[str, Any]], list[str]]] = field(default_factory=dict)
@@ -123,6 +127,7 @@ def build_empty_bundle(
         "up": np.array([0.0, 1.0, 0.0], dtype=float),
         "fragment_table": [],
         "atom_fragment_labels": [],
+        "unwrap_overflow": [],
     }
     return LoadedCrystal(
         name=name,
@@ -167,6 +172,91 @@ def _cluster_components(n_items: int, pairs: Iterable[tuple[int, int]]) -> list[
     return [sorted(group) for _, group in sorted(groups.items(), key=lambda item: min(item[1]))]
 
 
+DEFAULT_UNWRAP_MAX_ATOMS = 500
+
+
+def _unwrap_atom_pool(
+    atoms: list[dict[str, Any]],
+    bond_pairs: Iterable[tuple[int, int]],
+    cell,
+    M,
+    components: Iterable[list[int]],
+    *,
+    max_atoms: int | None = DEFAULT_UNWRAP_MAX_ATOMS,
+) -> tuple[list[dict[str, Any]], list[list[int]]]:
+    out = [dict(atom) for atom in atoms]
+    graph = nx.Graph()
+    graph.add_nodes_from(range(len(out)))
+    for i, j in bond_pairs:
+        i = int(i)
+        j = int(j)
+        start = np.asarray(out[i]["cart"], dtype=float)
+        near = np.asarray(pc._nearest_pbc_cart(out[i]["cart"], out[j]["cart"], cell), dtype=float)
+        vector = near - start if i < j else start - near
+        graph.add_edge(i, j, vector=vector)
+
+    positions = np.asarray([atom["cart"] for atom in out], dtype=float)
+    inv_m = np.linalg.inv(np.asarray(M, dtype=float))
+    overflow: list[list[int]] = []
+    for component in components:
+        unwrapped, completed = unwrap_positions_along_bonds(
+            graph,
+            component,
+            positions,
+            max_atoms=max_atoms,
+        )
+        if not completed:
+            overflow.append(list(component))
+            continue
+        for local_idx, atom_idx in enumerate(component):
+            out[atom_idx]["cart"] = unwrapped[local_idx]
+            out[atom_idx]["frac"] = inv_m @ unwrapped[local_idx]
+            out[atom_idx]["_unwrapped"] = True
+    return out, overflow
+
+
+def _unwrapped_atoms_from_atoms(
+    atoms,
+    cell,
+    M,
+    *,
+    include_minor: bool = True,
+    max_atoms: int | None = DEFAULT_UNWRAP_MAX_ATOMS,
+) -> tuple[list[dict[str, Any]], list[list[int]]]:
+    ops = scene_ops()
+    atom_pool = []
+    source_indices = []
+    for idx, atom in enumerate(atoms):
+        copied = dict(atom)
+        copied["_source_index"] = idx
+        copied["_unwrapped"] = False
+        if ops.is_minor(copied) and not include_minor:
+            continue
+        atom_pool.append(copied)
+        source_indices.append(idx)
+    if not atom_pool:
+        return [], []
+
+    bond_pairs = ops.find_bonds(atom_pool, cell=cell)
+    components = _cluster_components(len(atom_pool), bond_pairs)
+    unwrapped_pool, overflow_local = _unwrap_atom_pool(
+        atom_pool,
+        bond_pairs,
+        cell,
+        M,
+        components,
+        max_atoms=max_atoms,
+    )
+
+    unwrapped_atoms = [dict(atom) for atom in atoms]
+    for atom in unwrapped_atoms:
+        atom["_unwrapped"] = False
+    for local_idx, source_idx in enumerate(source_indices):
+        unwrapped_atoms[source_idx] = dict(unwrapped_pool[local_idx])
+    overflow = [[source_indices[idx] for idx in component] for component in overflow_local]
+    return unwrapped_atoms, overflow
+
+
 def _fragment_table_from_atoms(
     bundle_name: str,
     atoms,
@@ -189,8 +279,7 @@ def _fragment_table_from_atoms(
 
     bond_pairs = ops.find_bonds(atom_pool, cell=cell)
     components = _cluster_components(len(atom_pool), bond_pairs)
-    for component in components:
-        atom_pool = pc.assemble_component_p1(atom_pool, component, bond_pairs, M)
+    atom_pool, _ = _unwrap_atom_pool(atom_pool, bond_pairs, cell, M, components)
 
     fragments = []
     for component in components:
@@ -345,10 +434,12 @@ def build_bundle_scene(
         display_mode=display_mode,
         ops=ops,
         formula_unit_atoms=bundle.formula_unit_atoms if display_mode == "formula_unit" else None,
+        unwrapped_atoms=bundle.unwrapped_atoms,
     )
     scene["cif_path"] = bundle.cif_path
     scene["view_direction"] = view_dir
     scene["up"] = up
+    scene["unwrap_overflow"] = copy.deepcopy(bundle.unwrap_overflow)
     fragment_cache_key = ("scene", display_mode, bool(show_hydrogen))
     cached_fragments = bundle.fragment_table_cache.get(fragment_cache_key)
     if cached_fragments is None:
@@ -386,6 +477,7 @@ def build_loaded_crystal(
     raw_atoms, cell, M = ops.parse_asu(cif_path)
     molcrys_analysis = molcrys_bridge.analyze(raw_atoms, M)
     formula_unit_atoms = molcrys_bridge.select_formula_unit(raw_atoms, M, analysis=molcrys_analysis)
+    unwrapped_atoms, unwrap_overflow = _unwrapped_atoms_from_atoms(raw_atoms, cell, M, include_minor=True)
     view_dir, up = legacy_scene._resolve_view(ops, name, raw_atoms, M, cell, preset)
     R = ops.view_rotation(view_dir, up)
     final_title = title or name
@@ -401,10 +493,12 @@ def build_loaded_crystal(
         display_mode="formula_unit",
         ops=ops,
         formula_unit_atoms=formula_unit_atoms,
+        unwrapped_atoms=unwrapped_atoms,
     )
     initial_scene["cif_path"] = cif_path
     initial_scene["view_direction"] = np.array(view_dir, dtype=float)
     initial_scene["up"] = np.array(up, dtype=float)
+    initial_scene["unwrap_overflow"] = copy.deepcopy(unwrap_overflow)
     fragment_table, atom_fragment_labels = _fragment_table_from_atoms(
         name,
         initial_scene["draw_atoms"],
@@ -440,6 +534,8 @@ def build_loaded_crystal(
         crystal=molcrys_analysis.crystal,
         molcrys_analysis=molcrys_analysis,
         formula_unit_atoms=[dict(atom) for atom in formula_unit_atoms],
+        unwrapped_atoms=[dict(atom) for atom in unwrapped_atoms],
+        unwrap_overflow=[list(component) for component in unwrap_overflow],
         scene_cache={("formula_unit", False): initial_scene},
         fragment_table=fragment_table,
         topology_fragment_table=topology_fragment_table,
@@ -514,5 +610,6 @@ def bundle_json(bundle: LoadedCrystal) -> Dict[str, Any]:
         "scene": scene_json(bundle.scene),
         "fragment_table": copy.deepcopy(bundle.fragment_table),
         "topology_fragment_table": copy.deepcopy(bundle.topology_fragment_table),
+        "unwrap_overflow": copy.deepcopy(bundle.unwrap_overflow),
         "source": bundle.source,
     }

@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from crystal_viewer.loader import build_empty_bundle
-from crystal_viewer.ortep import ortep_atom_mesh_traces, ortep_axis_dash_traces
+from crystal_viewer.ortep import ortep_atom_mesh_traces, ortep_axis_dash_traces, ortep_octant_shade_traces
 
 
 def test_ortep_traces_include_mesh_and_optional_axes():
@@ -23,3 +23,4 @@ def test_ortep_traces_include_mesh_and_optional_axes():
     assert ortep_atom_mesh_traces(scene, style)
     assert ortep_axis_dash_traces(scene, style)
     assert not ortep_axis_dash_traces(scene, {**style, "ortep_show_principal_axes": False})
+    assert ortep_octant_shade_traces(scene, {**style, "ortep_octant_shading": True})

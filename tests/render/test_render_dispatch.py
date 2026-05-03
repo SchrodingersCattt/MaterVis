@@ -67,3 +67,66 @@ def test_render_dispatch_cartesian_product_builds_figures():
             assert any(trace.type == "scatter3d" for trace in fig.data)
         else:
             assert any(trace.type == "mesh3d" for trace in fig.data)
+
+
+def test_wireframe_builds_ring_and_bond_meshes_without_spheres():
+    fig = build_figure(
+        _scene(),
+        {
+            "material": "mesh",
+            "style": "wireframe",
+            "disorder": "none",
+            "atom_scale": 1.0,
+            "bond_radius": 0.1,
+            "axis_scale": 0.1,
+            "show_axes": False,
+            "show_labels": False,
+            "topology_enabled": False,
+        },
+    )
+    names = {trace.name for trace in fig.data if getattr(trace, "name", None)}
+    assert "wireframe-atoms" in names
+    assert "wireframe-bonds" in names
+
+
+def test_dashed_disorder_fast_path_sets_dash_style():
+    fig = build_figure(
+        _scene(),
+        {
+            "material": "flat",
+            "style": "ball_stick",
+            "disorder": "dashed_bonds",
+            "atom_scale": 1.0,
+            "bond_radius": 0.1,
+            "axis_scale": 0.1,
+            "show_axes": False,
+            "show_labels": False,
+            "topology_enabled": False,
+        },
+    )
+    bond_lines = [trace for trace in fig.data if trace.type == "scatter3d" and getattr(trace, "mode", None) == "lines"]
+    assert any(getattr(trace.line, "dash", None) == "dash" for trace in bond_lines)
+
+
+def test_monochrome_style_renders_black_atoms_and_bonds():
+    fig = build_figure(
+        _scene(),
+        {
+            "material": "flat",
+            "style": "ball_stick",
+            "disorder": "none",
+            "atom_scale": 1.0,
+            "bond_radius": 0.1,
+            "axis_scale": 0.1,
+            "show_axes": False,
+            "show_labels": False,
+            "topology_enabled": False,
+            "monochrome": True,
+        },
+    )
+    marker_colors = [
+        trace.marker.color
+        for trace in fig.data
+        if trace.type == "scatter3d" and getattr(trace, "mode", None) == "markers" and getattr(trace.marker, "color", None)
+    ]
+    assert "#000000" in marker_colors

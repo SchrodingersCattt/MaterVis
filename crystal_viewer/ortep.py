@@ -153,6 +153,10 @@ def _atom_u(atom: dict):
     return atom.get("U"), float(atom.get("uiso", 0.04) or 0.04)
 
 
+def _atom_color(atom: dict, style: dict) -> str:
+    return "#000000" if style.get("monochrome", False) else atom.get("color", "#808080")
+
+
 def ortep_atom_mesh_traces(scene: dict, style: dict):
     """Batch all ORTEP ellipsoids that share a (color, opacity) group
     into a single ``Mesh3d`` trace.
@@ -197,7 +201,7 @@ def ortep_atom_mesh_traces(scene: dict, style: dict):
             continue
         is_minor = bool(atom.get("is_minor"))
         opacity = minor_opacity if (is_minor and fade_minor) else major_opacity
-        color = atom.get("color", "#808080")
+        color = _atom_color(atom, style)
         key = (color, opacity)
         bucket = groups.setdefault(key, {"verts": [], "tris": [], "vert_offset": 0})
         U, uiso = _atom_u(atom)
@@ -259,7 +263,7 @@ def ortep_atom_billboard_traces(scene: dict, style: dict):
                 i=tris[:, 0],
                 j=tris[:, 1],
                 k=tris[:, 2],
-                color=atom.get("color", "#808080"),
+                color=_atom_color(atom, style),
                 opacity=1.0,
                 hoverinfo="skip",
                 showlegend=False,
@@ -298,12 +302,72 @@ def ortep_axis_dash_traces(scene: dict, style: dict):
 
 
 def ortep_octant_shade_traces(scene: dict, style: dict):
-    # Kept as a separate layer for callers that need full ORTEP-style octant
-    # shading. The default implementation returns no extra traces unless the
-    # style flag is enabled; mesh colour modulation can be added here later.
     if not style.get("ortep_octant_shading", False):
         return []
-    return []
+    probability = float(style.get("ortep_probability", 0.5))
+    color = style.get("ortep_octant_shadow_color", "#000000")
+    opacity = float(style.get("ortep_octant_shadow_alpha", 0.18))
+    steps = int(style.get("ortep_octant_steps", 5))
+    selected_octants = [
+        (sx, sy, sz)
+        for sx in (-1.0, 1.0)
+        for sy in (-1.0, 1.0)
+        for sz in (-1.0, 1.0)
+        if sx * sy * sz > 0.0
+    ]
+
+    vertices: list[np.ndarray] = []
+    triangles: list[list[int]] = []
+    for atom in scene.get("draw_atoms", []):
+        if style.get("show_minor_only", False) and not atom.get("is_minor"):
+            continue
+        center = np.asarray(atom["cart"], dtype=float)
+        U, uiso = _atom_u(atom)
+        lengths, axes = ellipsoid_principal_axes(U, probability=probability, uiso=uiso)
+        for sx, sy, sz in selected_octants:
+            base = len(vertices)
+            for ti in range(steps + 1):
+                theta = 0.5 * math.pi * ti / steps
+                for pi in range(steps + 1):
+                    phi = 0.5 * math.pi * pi / steps
+                    local = np.array(
+                        [
+                            sx * math.sin(theta) * math.cos(phi),
+                            sy * math.sin(theta) * math.sin(phi),
+                            sz * math.cos(theta),
+                        ],
+                        dtype=float,
+                    )
+                    vertices.append(center + axes @ (lengths * local))
+            stride = steps + 1
+            for ti in range(steps):
+                for pi in range(steps):
+                    a = base + ti * stride + pi
+                    b = a + 1
+                    c = a + stride
+                    d = c + 1
+                    triangles.extend([[a, c, b], [b, c, d]])
+
+    if not vertices:
+        return []
+    verts = np.asarray(vertices, dtype=float)
+    tris = np.asarray(triangles, dtype=int)
+    return [
+        go.Mesh3d(
+            x=verts[:, 0],
+            y=verts[:, 1],
+            z=verts[:, 2],
+            i=tris[:, 0],
+            j=tris[:, 1],
+            k=tris[:, 2],
+            color=color,
+            opacity=opacity,
+            hoverinfo="skip",
+            showlegend=False,
+            flatshading=True,
+            name="ortep-octant-shading",
+        )
+    ]
 
 
 def build_ortep_panel_figure(scene: dict, *, probability: float = 0.5, show_axes: bool = True, shade_octants: bool = False, **kwargs):

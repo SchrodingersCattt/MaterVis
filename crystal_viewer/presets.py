@@ -49,7 +49,9 @@ DEFAULT_STYLE = {
     "axis_key_italic": True,
     "fast_rendering": False,
     "topology_enabled": True,
+    "monochrome": False,
     "ortep_probability": 0.5,
+    "ortep_mode": "ortep_axes",
     "ortep_show_principal_axes": True,
     "ortep_axis_color": "#222222",
     "ortep_axis_linewidth": 1.6,
@@ -60,6 +62,28 @@ DEFAULT_STYLE = {
     # or to re-skin existing ones for publication figures. The ``elements``
     # dict takes precedence over ``elements_light`` for both primary colour
     # and highlight colour. Keys are element symbols (e.g. ``"I"``, ``"Na"``).
+    "element_colors": {},
+    "element_colors_light": {},
+}
+
+ORTEP_MODES = {
+    "ortep_solid": {
+        "ortep_show_principal_axes": False,
+        "ortep_octant_shading": False,
+    },
+    "ortep_axes": {
+        "ortep_show_principal_axes": True,
+        "ortep_octant_shading": False,
+    },
+    "ortep_octant": {
+        "ortep_show_principal_axes": False,
+        "ortep_octant_shading": True,
+    },
+}
+
+MONOCHROME_STYLE = {
+    "monochrome": True,
+    "label_color": "#000000",
     "element_colors": {},
     "element_colors_light": {},
 }
