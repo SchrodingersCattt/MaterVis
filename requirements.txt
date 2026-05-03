@@ -6,6 +6,11 @@ gemmi
 pymatgen
 kaleido
 flask-sock
+# brotli + gzip for /_dash-update-component responses. The Mesh3d
+# vertex base64 (and our 1 MB-per-frame topology figure) compresses
+# ~5x; without this every Labels/Axes click ships a megabyte over
+# the wire and feels like a 5-10 s lag on consumer connections.
+flask-compress
 matplotlib
 pillow
 ase

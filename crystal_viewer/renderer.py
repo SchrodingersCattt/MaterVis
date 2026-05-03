@@ -475,16 +475,23 @@ def _bond_mesh_traces(scene: dict, style: dict):
 
 
 def _atom_mesh_traces(scene: dict, style: dict):
-    # Per-atom tessellation budget. For typical structures (<=200 atoms)
-    # we use lat=6 / lon=10 (62 verts) -- spheres look smooth at any
-    # reasonable zoom. For PEP-sized unit cells (~700 atoms) we drop to
-    # lat=4 / lon=8 (26 verts), which is invisible at the camera
-    # distance the dense scene forces but cuts the Plotly array-codec
-    # cost by ~2.4x and keeps warm-rebuild latency under a second.
+    # Per-atom tessellation budget. The over-the-wire cost of one
+    # sphere is ``(lat-1)*lon + 2`` Mesh3d verts × (3 × 4 B for
+    # f32 coords + faces). For a 200-atom DAP-4 unit cell with
+    # topology overlay the figure JSON used to be ~1.4 MB; dropping
+    # subdivision halves the vertex count and gets the brotli-
+    # compressed wire size into the ~120 kB range, where a Labels
+    # toggle round-trips in well under a second on most consumer
+    # connections. The visual difference vs the old 6/10 default
+    # is invisible at the camera distance forced by a dense unit
+    # cell. Users who insist on perfectly smooth balls pick the
+    # "formula unit" Display Scope (n_atoms < 60).
     n_atoms = len(scene.get("draw_atoms", []))
     if n_atoms > 400:
-        lat_steps, lon_steps = 4, 8
-    elif n_atoms > 200:
+        lat_steps, lon_steps = 3, 6
+    elif n_atoms > 150:
+        lat_steps, lon_steps = 4, 7
+    elif n_atoms > 60:
         lat_steps, lon_steps = 5, 9
     else:
         lat_steps, lon_steps = 6, 10
@@ -771,7 +778,7 @@ def _label_traces(scene: dict, style: dict):
                 showlegend=False,
             )
         )
-    cache[key] = [tr.to_plotly_json() for tr in traces]
+    cache[key] = [_round_coord_arrays(tr.to_plotly_json()) for tr in traces]
     return cache[key]
 
 
@@ -1265,16 +1272,25 @@ def _merged_hull_mesh(overlays: list[tuple[list, float]], color: str):
 
 
 def _merged_hull_edges(overlays: list[list], color: str):
-    """One Mesh3d cylinder bundle for every polyhedron edge in the
-    scene. Takes a list of shell-coord arrays and emits a single
-    trace -- ~50x fewer Plotly traces than the per-overlay path when
-    many polyhedra are tiled."""
+    """All polyhedron edges in the scene packed into a single
+    ``Scatter3d`` line trace using NaN-separated segments.
+
+    The previous implementation tessellated each edge into a Mesh3d
+    pentagonal-prism cylinder -- visually nicer but ~7-10x heavier in
+    JSON. With many polyhedra tiled (DAP-4 has 40+ centres) the trace
+    blew past 300 KB and dominated every callback round-trip. Lines
+    in WebGL render in well under a millisecond and serialize to a
+    fraction of the size; a non-zero ``line.width`` keeps the visual
+    weight close enough to the cylinder version for the interactive
+    overlay. Static publication exports that want fat tubes can opt
+    back into the cylinder path via the legacy renderer if needed."""
     try:
         from scipy.spatial import ConvexHull
     except Exception:  # pragma: no cover - optional dep
         return []
-    all_segments: list[tuple[np.ndarray, np.ndarray]] = []
-    lengths: list[float] = []
+    xs: list[float] = []
+    ys: list[float] = []
+    zs: list[float] = []
     for coords in overlays:
         coords = np.asarray(coords, dtype=float)
         if len(coords) < 4:
@@ -1292,21 +1308,23 @@ def _merged_hull_edges(overlays: list[list], color: str):
         for i, j in edges:
             p0 = coords[i]
             p1 = coords[j]
-            all_segments.append((p0, p1))
-            lengths.append(float(np.linalg.norm(p1 - p0)))
-    if not all_segments:
+            xs.extend([float(p0[0]), float(p1[0]), float("nan")])
+            ys.extend([float(p0[1]), float(p1[1]), float("nan")])
+            zs.extend([float(p0[2]), float(p1[2]), float("nan")])
+    if not xs:
         return []
-    typical = float(np.median(lengths)) if lengths else 1.0
-    radius = max(0.025, min(0.085, 0.025 * typical))
-    trace = _segment_cylinder_trace(
-        all_segments,
-        radius=radius,
-        color=color,
+    trace = go.Scatter3d(
+        x=xs,
+        y=ys,
+        z=zs,
+        mode="lines",
+        line=dict(color=color, width=4),
         opacity=0.95,
-        sides=5,
+        hoverinfo="skip",
+        showlegend=False,
         name="coordination-edges",
     )
-    return [trace] if trace is not None else []
+    return [trace]
 
 
 def topology_background_traces(topology_data: dict | None, style: dict | None = None):
@@ -1500,15 +1518,15 @@ def _traces_to_dicts(traces) -> list[dict]:
     out = []
     for tr in traces:
         if isinstance(tr, dict):
-            out.append(tr)
+            out.append(_round_coord_arrays(dict(tr)))
         else:
-            out.append(tr.to_plotly_json())
+            out.append(_round_coord_arrays(tr.to_plotly_json()))
     return out
 
 
 def _trace_to_json_safe_dict(trace) -> dict:
     payload = trace if isinstance(trace, dict) else trace.to_plotly_json()
-    return _json_safe_plotly(payload)
+    return _round_coord_arrays(_json_safe_plotly(payload))
 
 
 def _json_safe_plotly(value):
@@ -1521,6 +1539,63 @@ def _json_safe_plotly(value):
     if isinstance(value, list):
         return [_json_safe_plotly(item) for item in value]
     return value
+
+
+# 0.001 Å (0.1 pm) is two orders of magnitude below the smallest atomic
+# feature anyone visualises in this app, so rounding mesh vertex / line
+# coordinates here is a free win on payload size: full f64 stringifies
+# to ~17 chars, three-decimal floats to ~6, ie ~3x smaller for any
+# vertex-heavy trace (atoms, bonds, hull edges, polyhedron meshes).
+_COORD_KEYS = ("x", "y", "z")
+_COORD_ROUND_DECIMALS = 3
+_INDEX_KEYS = ("i", "j", "k")
+
+
+def _round_coord_arrays(trace_dict: dict) -> dict:
+    """Quantise vertex coordinates of a Plotly trace dict in place and
+    return it.
+
+    Three things happen here, all aimed at trimming the figure JSON
+    Dash ships to the browser on every ``update_view``:
+
+    1. Plain Python lists of floats get rounded to ``_COORD_ROUND_DECIMALS``
+       (only really shrinks JSON-encoded coords, since ``17 chars -> ~6``).
+    2. Numpy float arrays get downcast to ``float32``. Plotly serialises
+       numpy arrays as base64 ``bdata``; ``f8`` doubles take 8 B / coord,
+       ``f4`` floats take 4 B -- a flat 50% cut on every Mesh3d vertex
+       array. Three-decimal rounding (~1 mÅ) is well inside f32's ~7
+       significant decimal digits, so this is lossless w.r.t. the
+       quantisation step (and far below any visible feature).
+    3. Index arrays (``i``/``j``/``k``) get cast to the smallest int
+       dtype that fits, so a ~10 k-vertex sphere mesh's faces ride as
+       ``i2`` (2 B) or ``i4`` instead of ``i8`` (8 B) -- another ~75%
+       drop on the index payload.
+    """
+
+    for key in _COORD_KEYS:
+        seq = trace_dict.get(key)
+        if isinstance(seq, list) and seq and isinstance(seq[0], (int, float)):
+            trace_dict[key] = [
+                round(float(v), _COORD_ROUND_DECIMALS) if isinstance(v, (int, float)) else v
+                for v in seq
+            ]
+        elif isinstance(seq, np.ndarray) and seq.dtype.kind == "f" and seq.dtype.itemsize > 4:
+            trace_dict[key] = np.ascontiguousarray(seq, dtype=np.float32)
+    for key in _INDEX_KEYS:
+        seq = trace_dict.get(key)
+        if isinstance(seq, list) and seq and isinstance(seq[0], (int, float)):
+            trace_dict[key] = [int(v) for v in seq]
+        elif isinstance(seq, np.ndarray) and seq.dtype.kind in ("i", "u"):
+            n = int(seq.max(initial=0)) + 1
+            if n < 32_768:
+                target = np.int16
+            elif n < 2_147_483_648:
+                target = np.int32
+            else:
+                target = seq.dtype
+            if seq.dtype != target:
+                trace_dict[key] = np.ascontiguousarray(seq, dtype=target)
+    return trace_dict
 
 
 def _cached_atom_bond_meshes(scene: dict, style: dict, *, use_fast: bool):
@@ -1563,10 +1638,10 @@ def _cached_atom_bond_meshes(scene: dict, style: dict, *, use_fast: bool):
     minor_outline = _minor_outline_traces(scene, style)
     minor_bonds = _minor_bond_wireframe_traces(scene, style)
     payload = {
-        "atom_dicts": [tr.to_plotly_json() for tr in atom_traces],
-        "bond_dicts": [tr.to_plotly_json() for tr in bond_traces],
-        "minor_outline_dicts": [tr.to_plotly_json() for tr in minor_outline],
-        "minor_bond_dicts": [tr.to_plotly_json() for tr in minor_bonds],
+        "atom_dicts": [_round_coord_arrays(tr.to_plotly_json()) for tr in atom_traces],
+        "bond_dicts": [_round_coord_arrays(tr.to_plotly_json()) for tr in bond_traces],
+        "minor_outline_dicts": [_round_coord_arrays(tr.to_plotly_json()) for tr in minor_outline],
+        "minor_bond_dicts": [_round_coord_arrays(tr.to_plotly_json()) for tr in minor_bonds],
     }
     cache[key] = payload
     return payload
@@ -1610,7 +1685,7 @@ def build_figure(scene: dict, style: dict, topology_data: dict | None = None) ->
     trace_dicts.extend(_traces_to_dicts(_unit_cell_traces(scene, style)))
     if topology_on:
         trace_dicts.extend(_traces_to_dicts(topology_foreground_traces(topology_data, style)))
-    trace_dicts.append(_atom_selection_trace(scene, style).to_plotly_json())
+    trace_dicts.append(_round_coord_arrays(_atom_selection_trace(scene, style).to_plotly_json()))
 
     # ``_validate=False`` skips Plotly's per-property validator chain when
     # constructing the figure. We've already validated the dicts via

@@ -14,7 +14,7 @@ import numpy as np
 import plotly.io as pio
 
 try:
-    from dash import Dash, Input, Output, State, callback_context, dcc, html, no_update
+    from dash import ALL, Dash, Input, Output, State, callback_context, dcc, html, no_update
 except ImportError as exc:  # pragma: no cover - user-facing fallback
     raise SystemExit(
         "Dash is required for the browser viewer. "
@@ -44,6 +44,45 @@ WORKSPACE_DIR = workspace_root(PACKAGE_DIR)
 DEFAULT_PRESET_PATH = default_preset_path(WORKSPACE_DIR)
 LEGACY_EXPORT_MODULE = "crystal_viewer.legacy.plot_crystal"
 PLACEHOLDER_STRUCTURE = "__upload__"
+
+
+def _camera_store_payload(scene_id: Optional[str], camera: Optional[dict[str, Any]]) -> dict[str, Any]:
+    return {"scene_id": scene_id, "camera": copy.deepcopy(camera)}
+
+
+def _camera_from_store(camera_state: Optional[dict[str, Any]], scene_id: Optional[str]) -> Optional[dict[str, Any]]:
+    if not isinstance(camera_state, dict):
+        return None
+    if "camera" in camera_state:
+        if camera_state.get("scene_id") != scene_id:
+            return None
+        camera = camera_state.get("camera")
+        return copy.deepcopy(camera) if isinstance(camera, dict) else None
+    # Backward-compatible with the old store shape, but only when the
+    # selected scene id is unknown. Otherwise an old active-tab camera could
+    # leak into the newly selected scene.
+    if scene_id is None and "eye" in camera_state:
+        return copy.deepcopy(camera_state)
+    return None
+
+
+def _minor_opacity_disabled(disorder: Optional[str]) -> bool:
+    return disorder != "opacity"
+
+
+def _minor_opacity_control_style(disorder: Optional[str]) -> dict[str, Any]:
+    style: dict[str, Any] = {"transition": "opacity 120ms ease"}
+    if _minor_opacity_disabled(disorder):
+        style["opacity"] = 0.4
+    return style
+
+
+def _status_class(level: str = "info") -> str:
+    return f"status-banner status-banner--{level}"
+
+
+def _status_message(message: str, level: str = "info") -> tuple[str, str]:
+    return message, _status_class(level)
 
 
 def _structure_summary(scene: dict) -> str:
@@ -299,10 +338,24 @@ class ViewerBackend:
                 dcc.Tab(
                     label=scene["label"],
                     value=scene["id"],
-                    id={"type": "scene-tab", "scene_id": scene["id"]},
+                    id=f"scene-tab-{scene['id']}",
                 )
             )
         return tabs
+
+    def scene_close_buttons(self) -> list[Any]:
+        buttons = []
+        for scene in self.scene_store.list():
+            buttons.append(
+                html.Button(
+                    html.Span("\u00d7", id=f"scene-tab-close-{scene['id']}"),
+                    id={"type": "tab-close", "scene_id": scene["id"]},
+                    className="tab-close-x",
+                    n_clicks=0,
+                    title=f"Close {scene['label']}",
+                )
+            )
+        return buttons
 
     def scene_state(self, scene_id: Optional[str] = None) -> dict[str, Any]:
         scene = self.scene_store.get(scene_id)
@@ -373,10 +426,22 @@ class ViewerBackend:
         self._bump_version()
         return order
 
-    def set_active_scene(self, scene_id: str) -> dict[str, Any]:
+    def set_active_scene(self, scene_id: str, *, broadcast: bool = True) -> dict[str, Any]:
+        # ``broadcast`` controls whether ``pending_state`` is armed for
+        # the next ``sync_agent_state`` poll. The REST API agent path
+        # (``/api/v1/scenes/.../activate``) wants this so the browser
+        # UI picks up the change. Dash callbacks that originate *from*
+        # the same UI must pass ``broadcast=False``: otherwise they
+        # echo the change back to themselves on the next poll tick,
+        # which (a) re-runs every per-control callback (refresh
+        # topology species, refresh fragment options, ...) and (b)
+        # triggers a full ``update_view`` for nothing -- doubling the
+        # 1 MB-per-frame transfer cost on every click that carries a
+        # ``scene-tabs.value`` Input.
         scene = self.scene_store.set_active(scene_id)
         self.current_state = self.scene_state(scene.id)
-        self.pending_state = copy.deepcopy(self.current_state)
+        if broadcast:
+            self.pending_state = copy.deepcopy(self.current_state)
         self._bump_version()
         return scene.to_dict()
 
@@ -1048,6 +1113,30 @@ def create_app(
     app = Dash(__name__, assets_folder=os.path.join(PACKAGE_DIR, "assets"))
     app.crystal_backend = backend
 
+    # gzip + brotli the JSON figure responses. ``update_view`` ships
+    # ~1 MB of base64 mesh data per click and most of that string
+    # alphabet is plain ASCII, so it compresses to ~150-250 kB. On
+    # any user with <2 Mbit/s downstream that's the difference
+    # between a Labels-toggle taking ~5 s and ~0.5 s. Flask-Compress
+    # only kicks in for ``Accept-Encoding`` clients and skips bodies
+    # below ``COMPRESS_MIN_SIZE``, so it has no effect on the tiny
+    # capture_state / poll responses.
+    try:
+        from flask_compress import Compress
+
+        app.server.config.setdefault("COMPRESS_MIMETYPES", [
+            "text/html", "text/css", "text/javascript",
+            "application/javascript", "application/json", "application/octet-stream",
+        ])
+        app.server.config.setdefault("COMPRESS_LEVEL", 6)
+        app.server.config.setdefault("COMPRESS_BR_LEVEL", 4)
+        app.server.config.setdefault("COMPRESS_MIN_SIZE", 1024)
+        Compress(app.server)
+    except Exception:
+        # Compression is opportunistic; the app must still serve
+        # without it (e.g. on a stripped-down install).
+        pass
+
     first_state = backend.get_state()
     first_figure, first_topology = backend.figure_for_state(first_state)
     backend._first_figure_ready.set()
@@ -1056,8 +1145,20 @@ def create_app(
     app.layout = html.Div(
         [
             dcc.Store(id="agent-state-store", data=first_state),
-            dcc.Store(id="camera-state-store", data=first_state.get("camera")),
-            dcc.Interval(id="agent-state-poll", interval=800, n_intervals=0),
+            dcc.Store(
+                id="camera-state-store",
+                data=_camera_store_payload(first_state.get("scene_id"), first_state.get("camera")),
+            ),
+            dcc.Download(id="export-download"),
+            dcc.Interval(id="status-dismiss-timer", interval=5000, n_intervals=0, disabled=True),
+            # 5 s is a deliberate compromise: long enough to avoid
+            # interleaving a poll between every two user clicks (which
+            # otherwise re-pumps the whole control set through the
+            # cascade), short enough that REST API mutations show up
+            # in the UI within one human reaction time. When the API
+            # path becomes WebSocket-driven we'll be able to take this
+            # interval up to 30 s and let pushed messages do the work.
+            dcc.Interval(id="agent-state-poll", interval=5000, n_intervals=0),
             html.Div(id="state-sync-sentinel", style={"display": "none"}),
             html.Div(
                 [
@@ -1065,7 +1166,18 @@ def create_app(
                     html.Div(
                         [
                             html.Label("Scenes", style={"fontWeight": "bold"}),
-                            html.Button("+", id="scene-new-tab-btn", n_clicks=0, title="Duplicate active scene", style={"float": "right"}),
+                            html.Div(
+                                [
+                                    html.Button(
+                                        "+",
+                                        id="scene-new-tab-btn",
+                                        n_clicks=0,
+                                        title="Duplicate active scene as new tab",
+                                    ),
+                                    html.Span("Duplicate tab", className="scene-new-tab-hint"),
+                                ],
+                                style={"float": "right"},
+                            ),
                         ],
                         style={"marginBottom": "4px"},
                     ),
@@ -1074,6 +1186,11 @@ def create_app(
                         value=first_state.get("scene_id") or backend.active_scene_id(),
                         children=backend.scene_tabs(),
                         parent_className="scene-tabs",
+                    ),
+                    html.Div(
+                        id="scene-tab-close-row",
+                        children=backend.scene_close_buttons(),
+                        className="scene-tab-close-row",
                     ),
                     html.Div(
                         [
@@ -1196,14 +1313,21 @@ def create_app(
                         tooltip={"placement": "bottom", "always_visible": False},
                         updatemode="mouseup",
                     ),
-                    html.Label("Minor Opacity"),
-                    dcc.Slider(
-                        id="minor-opacity-slider",
-                        min=0.10, max=0.90, step=0.02,
-                        value=float(first_state["minor_opacity"]),
-                        marks={0.1: "0.1", 0.5: "0.5", 0.9: "0.9"},
-                        tooltip={"placement": "bottom", "always_visible": False},
-                        updatemode="mouseup",
+                    html.Div(
+                        [
+                            html.Label("Minor Opacity"),
+                            dcc.Slider(
+                                id="minor-opacity-slider",
+                                min=0.10, max=0.90, step=0.02,
+                                value=float(first_state["minor_opacity"]),
+                                marks={0.1: "0.1", 0.5: "0.5", 0.9: "0.9"},
+                                tooltip={"placement": "bottom", "always_visible": False},
+                                updatemode="mouseup",
+                                disabled=_minor_opacity_disabled(first_state.get("disorder", "outline_rings")),
+                            ),
+                        ],
+                        id="minor-opacity-control",
+                        style=_minor_opacity_control_style(first_state.get("disorder", "outline_rings")),
                     ),
                     html.Label("Axis Scale"),
                     dcc.Slider(
@@ -1252,10 +1376,11 @@ def create_app(
                     html.Button("Save Preset", id="save-preset-btn", n_clicks=0),
                     html.Button("Export Static Figure", id="export-btn", n_clicks=0, style={"marginLeft": "8px"}),
                     html.Div(
-                        id="status",
+                        id="status-banner",
                         children=f"Preset: {preset_path}",
-                        style={"marginTop": "12px", "whiteSpace": "pre-wrap", "fontSize": "13px"},
+                        className=_status_class("idle"),
                     ),
+                    html.Div(id="status", style={"display": "none"}),
                 ],
                 id="left-panel",
                 style={
@@ -1272,7 +1397,24 @@ def create_app(
             ),
             html.Div(id="left-splitter", className="panel-splitter"),
             html.Div(
-                [dcc.Graph(id="crystal-graph", figure=first_figure, style={"height": "100vh"})],
+                [
+                    dcc.Loading(
+                        dcc.Graph(id="crystal-graph", figure=first_figure, style={"height": "100vh"}),
+                        type="circle",
+                        color="#7C5CBF",
+                        # Avoid a spinner flash on every short callback
+                        # (capture_state is ~10 ms; a spinner that
+                        # appears for 50 ms reads as a stutter, not
+                        # progress). The 300 ms threshold is short
+                        # enough that on slow updates (cold figure
+                        # rebuild ~1.5 s, dense topology ~600 ms)
+                        # the user still gets feedback well before
+                        # they would start wondering if the click
+                        # registered.
+                        delay_show=300,
+                        delay_hide=0,
+                    )
+                ],
                 id="center-panel",
                 style={"flex": "1", "minWidth": 0},
             ),
@@ -1361,6 +1503,27 @@ def create_app(
         style={"display": "flex", "height": "100vh", "backgroundColor": "#FFFFFF"},
     )
 
+    def scene_control_outputs(state: dict[str, Any]) -> tuple[Any, ...]:
+        scene_id = state.get("scene_id") or backend.active_scene_id()
+        return (
+            state.get("scene_label") or state["structure"],
+            state["display_mode"],
+            state["display_options"],
+            state["atom_scale"],
+            state["bond_radius"],
+            state["minor_opacity"],
+            state.get("material", "mesh"),
+            state.get("style", "ball_stick"),
+            state.get("disorder", "outline_rings"),
+            state["axis_scale"],
+            list(state.get("topology_species_keys") or []),
+            state["topology_site_index"],
+            ["enabled"] if state.get("topology_enabled", True) else [],
+            state.get("topology_hull_color", "#7C5CBF"),
+            state,
+            _camera_store_payload(scene_id, state.get("camera")),
+        )
+
     @app.callback(
         Output("scene-tabs", "children"),
         Output("scene-tabs", "value"),
@@ -1445,22 +1608,48 @@ def create_app(
         # When the previously analysed fragment falls outside the new
         # scene we clear the dropdown so the topology callback falls
         # back to the "first match of selected species" default.
-        try:
-            structure = backend.get_state(scene_id).get("structure")
-            state = backend.normalize_state(
-                {
-                    "scene_id": scene_id,
-                    "structure": structure,
-                    "display_mode": display_mode,
-                    "display_options": display_options,
-                }
-            )
-        except Exception:
-            return no_update, no_update
-        opts = backend.fragment_options(state)
+        # Of the five Display checkboxes only Hydrogens affects which
+        # fragments exist. The other four (Labels/Axes/Minor Only/
+        # Unit Cell Box) all fire this callback too because they share
+        # the ``display-options`` Input, but recomputing the options
+        # would do nothing useful and ``backend.fragment_options`` can
+        # easily hit ~1s on dense unit cells. Short-circuit those.
+        hydrogens_on = "hydrogens" in (display_options or [])
+        cache_key = (scene_id, display_mode, hydrogens_on)
+        cached = getattr(refresh_fragment_options, "_cache", None)
+        if cached is not None and cached[0] == cache_key:
+            opts = cached[1]
+        else:
+            try:
+                structure = backend.get_state(scene_id).get("structure")
+                state = backend.normalize_state(
+                    {
+                        "scene_id": scene_id,
+                        "structure": structure,
+                        "display_mode": display_mode,
+                        "display_options": display_options,
+                    }
+                )
+            except Exception:
+                return no_update, no_update
+            opts = backend.fragment_options(state)
+            refresh_fragment_options._cache = (cache_key, opts)
         valid_values = {opt["value"] for opt in opts}
         keep = current_value if current_value in valid_values else None
-        return opts, keep
+        # The ``topology-site-index.value`` Output also writes the
+        # ``capture_state`` Input. Whenever we re-emit the same value
+        # we still cause Dash to fire a second ``capture_state``; if
+        # *that* returns ``no_update`` (which it will, since the patch
+        # is identical), Dash 2.18 collapses the whole agent-state
+        # update chain and ``update_view`` is never queued. Returning
+        # ``no_update`` for ``value`` whenever it's already correct
+        # avoids the spurious second capture entirely.
+        prev_opts = getattr(refresh_fragment_options, "_last_opts", None)
+        opts_out = no_update if prev_opts == opts else opts
+        if opts_out is not no_update:
+            refresh_fragment_options._last_opts = opts
+        value_out = no_update if keep == current_value else keep
+        return opts_out, value_out
 
     @app.callback(
         Output("scene-tabs", "children", allow_duplicate=True),
@@ -1495,6 +1684,77 @@ def create_app(
 
     @app.callback(
         Output("scene-tabs", "children", allow_duplicate=True),
+        Output("scene-tab-close-row", "children", allow_duplicate=True),
+        Output("scene-tabs", "value", allow_duplicate=True),
+        Output("status-banner", "children", allow_duplicate=True),
+        Output("status-banner", "className", allow_duplicate=True),
+        Output("status-dismiss-timer", "disabled", allow_duplicate=True),
+        Output("status-dismiss-timer", "n_intervals", allow_duplicate=True),
+        Input({"type": "tab-close", "scene_id": ALL}, "n_clicks"),
+        State("scene-tabs", "value"),
+        prevent_initial_call=True,
+    )
+    def close_scene_tab(close_clicks, active_scene_id):
+        if not close_clicks or not any(close_clicks):
+            return (no_update,) * 7
+        triggered = getattr(callback_context, "triggered_id", None)
+        if not isinstance(triggered, dict):
+            return (no_update,) * 7
+        scene_id = triggered.get("scene_id")
+        if not scene_id:
+            return (no_update,) * 7
+        if len(backend.scene_options()) <= 1:
+            message, class_name = _status_message("At least one scene tab must remain.", "warning")
+            return no_update, no_update, active_scene_id, message, class_name, False, 0
+        try:
+            backend.delete_scene(scene_id)
+        except Exception as exc:
+            message, class_name = _status_message(f"Scene action failed: {exc}", "error")
+            return no_update, no_update, active_scene_id, message, class_name, False, 0
+        message, class_name = _status_message("Closed scene.", "success")
+        return backend.scene_tabs(), backend.scene_close_buttons(), backend.active_scene_id(), message, class_name, False, 0
+
+    @app.callback(
+        Output("scene-tab-close-row", "children", allow_duplicate=True),
+        Input("scene-tabs", "children"),
+        prevent_initial_call=True,
+    )
+    def refresh_scene_close_buttons(_):
+        return backend.scene_close_buttons()
+
+    @app.callback(
+        Output("status-banner", "children", allow_duplicate=True),
+        Output("status-banner", "className", allow_duplicate=True),
+        Output("status-dismiss-timer", "disabled", allow_duplicate=True),
+        Output("status-dismiss-timer", "n_intervals", allow_duplicate=True),
+        Input("status", "children"),
+        prevent_initial_call=True,
+    )
+    def mirror_legacy_status(message):
+        if not message:
+            return no_update, no_update, no_update, no_update
+        text = str(message)
+        level = "success"
+        lowered = text.lower()
+        if "failed" in lowered or "error" in lowered:
+            level = "error"
+        elif "must" in lowered or "warning" in lowered:
+            level = "warning"
+        return text, _status_class(level), False, 0
+
+    # IMPORTANT: tab-switching (scene-tabs.value) and the agent-state
+    # poll (agent-state-poll.n_intervals) MUST share one callback that
+    # writes to the control props below. Splitting them into two
+    # callbacks -- with one using allow_duplicate=True -- triggers a
+    # Dash 2.18 bug where the *user-event* listener on every prop in
+    # the duplicate set is silently disabled: checkboxes, sliders and
+    # dropdowns still update the DOM but their onChange never reaches
+    # the server, so ``capture_state`` never fires. Concretely we saw
+    # all of Labels/Display Scope/Material/Style/Disorder turn into
+    # dead UI while the figure froze. Keeping a single non-duplicate
+    # writer per prop restores the dispatch.
+    @app.callback(
+        Output("scene-tabs", "children", allow_duplicate=True),
         Output("scene-tabs", "value", allow_duplicate=True),
         Output("scene-tab-rename-input", "value"),
         Output("display-mode-selector", "value"),
@@ -1513,31 +1773,32 @@ def create_app(
         Output("agent-state-store", "data"),
         Output("camera-state-store", "data"),
         Input("agent-state-poll", "n_intervals"),
+        Input("scene-tabs", "value"),
         prevent_initial_call=True,
     )
-    def sync_agent_state(_):
+    def sync_agent_state(_n_intervals, scene_id):
+        triggered = (
+            callback_context.triggered[0]["prop_id"].split(".")[0]
+            if callback_context.triggered
+            else None
+        )
+        if triggered == "scene-tabs":
+            if not scene_id:
+                return (no_update,) * 18
+            backend.set_active_scene(scene_id, broadcast=False)
+            state = backend.get_state(scene_id)
+            return (
+                no_update,
+                no_update,
+                *scene_control_outputs(state),
+            )
         state = backend.pop_pending_state()
         if not state:
             return (no_update,) * 18
         return (
             backend.scene_tabs(),
             state.get("scene_id") or backend.active_scene_id(),
-            state.get("scene_label") or state["structure"],
-            state["display_mode"],
-            state["display_options"],
-            state["atom_scale"],
-            state["bond_radius"],
-            state["minor_opacity"],
-            state.get("material", "mesh"),
-            state.get("style", "ball_stick"),
-            state.get("disorder", "outline_rings"),
-            state["axis_scale"],
-            list(state.get("topology_species_keys") or []),
-            state["topology_site_index"],
-            ["enabled"] if state.get("topology_enabled", True) else [],
-            state.get("topology_hull_color", "#7C5CBF"),
-            state,
-            state.get("camera"),
+            *scene_control_outputs(state),
         )
 
     @app.callback(
@@ -1574,8 +1835,11 @@ def create_app(
         topology_toggle,
         topology_hull_color,
     ):
+        triggered = callback_context.triggered[0]["prop_id"].split(".")[0] if callback_context.triggered else None
+        if triggered == "scene-tabs":
+            return no_update
         if scene_id:
-            backend.set_active_scene(scene_id)
+            backend.set_active_scene(scene_id, broadcast=False)
         patch: dict[str, Any] = {
             "scene_id": scene_id,
             "display_mode": display_mode,
@@ -1593,6 +1857,15 @@ def create_app(
             "topology_hull_color": topology_hull_color or "#7C5CBF",
             "fast_rendering": material == "flat",
         }
+        # Skip the write -- and the cascade through ``update_view`` --
+        # if every captured field already matches the persisted state.
+        # The chain ``Labels click -> capture_state -> agent-state-store
+        # -> refresh_fragment_options -> topology-site-index.value ->
+        # capture_state -> agent-state-store`` would otherwise double up
+        # every figure render, doubling the 1.4 MB-per-frame cost.
+        prev = backend.get_state(scene_id)
+        if all(prev.get(k) == v for k, v in patch.items() if k != "scene_id"):
+            return no_update
         backend.record_state(patch)
         return backend.get_state()
 
@@ -1600,17 +1873,26 @@ def create_app(
         Output("camera-state-store", "data", allow_duplicate=True),
         Input("crystal-graph", "relayoutData"),
         State("camera-state-store", "data"),
+        State("scene-tabs", "value"),
         prevent_initial_call=True,
     )
-    def capture_camera(relayout_data, camera_state):
+    def capture_camera(relayout_data, camera_state, scene_id):
         camera = _camera_from_relayout_data(
             relayout_data,
-            camera_state or backend.get_state().get("camera"),
+            _camera_from_store(camera_state, scene_id) or backend.get_state(scene_id).get("camera"),
         )
         if not camera:
             return no_update
-        backend.record_state({"camera": camera})
-        return camera
+        backend.patch_state({"camera": camera}, scene_id=scene_id)
+        return _camera_store_payload(scene_id, camera)
+
+    @app.callback(
+        Output("minor-opacity-slider", "disabled"),
+        Output("minor-opacity-control", "style"),
+        Input("disorder-selector", "value"),
+    )
+    def gate_minor_opacity(disorder):
+        return _minor_opacity_disabled(disorder), _minor_opacity_control_style(disorder)
 
     @app.callback(
         Output("crystal-graph", "figure"),
@@ -1625,14 +1907,39 @@ def create_app(
         camera_state,
     ):
         state = backend.normalize_state(agent_state or backend.get_state())
-        if camera_state:
-            state["camera"] = camera_state
+        camera = _camera_from_store(camera_state, state.get("scene_id"))
+        if camera:
+            state["camera"] = camera
         fig, topology_data = backend.figure_for_state(state)
+        # The right-hand sidebar only changes when the *topology* state
+        # or the chosen scene changes. Keep a memo on the callback
+        # itself so toggling Labels / Axes / Atom Scale -- which all
+        # leave the topology untouched -- skips serialising the
+        # histogram + markdown + structure summary every time. Each of
+        # these is only ~1-3 kB but they re-render on the client, and
+        # the markdown table tear-down was visible in the CPU profile.
+        topo_key = (
+            state.get("scene_id"),
+            state.get("structure"),
+            state.get("display_mode"),
+            tuple(state.get("topology_species_keys") or ()),
+            state.get("topology_site_index"),
+            state.get("topology_enabled"),
+            "hydrogens" in (state.get("display_options") or []),
+        )
+        prev_key = getattr(update_view, "_topo_cache_key", None)
+        if prev_key == topo_key:
+            return fig, no_update, no_update, no_update
+        update_view._topo_cache_key = topo_key
         summary = _structure_summary(backend.scene_for_state(state))
         return fig, topology_histogram_figure(topology_data), topology_results_markdown(topology_data), summary
 
     @app.callback(
-        Output("status", "children"),
+        Output("status-banner", "children"),
+        Output("status-banner", "className"),
+        Output("export-download", "data"),
+        Output("status-dismiss-timer", "disabled"),
+        Output("status-dismiss-timer", "n_intervals"),
         Input("save-preset-btn", "n_clicks"),
         Input("export-btn", "n_clicks"),
         prevent_initial_call=True,
@@ -1640,15 +1947,87 @@ def create_app(
     def save_or_export(_, __):
         triggered = callback_context.triggered[0]["prop_id"].split(".")[0] if callback_context.triggered else None
         if triggered == "export-btn":
-            result = backend.export_static()
-            return f"Saved preset: {backend.preset_path}\nStatic export return code: {result['returncode']}\n{result['stderr'] or result['stdout']}"
+            png = backend.render_current_png(backend.active_scene_id())
+            scene_label = backend.get_state().get("scene_label") or "mattervis"
+            filename = f"{scene_label.replace(os.sep, '_')}.png"
+            message, class_name = _status_message(f"Export ready: {filename}", "success")
+            return message, class_name, dcc.send_bytes(lambda buffer: buffer.write(png), filename), False, 0
         result = backend.save_preset()
-        return f"Saved preset: {result['path']}"
+        message, class_name = _status_message(f"Saved preset: {result['path']}", "success")
+        return message, class_name, no_update, False, 0
+
+    @app.callback(
+        Output("status-banner", "children", allow_duplicate=True),
+        Output("status-banner", "className", allow_duplicate=True),
+        Output("status-dismiss-timer", "disabled", allow_duplicate=True),
+        Input("status-dismiss-timer", "n_intervals"),
+        prevent_initial_call=True,
+    )
+    def dismiss_status(n_intervals):
+        if not n_intervals:
+            return no_update, no_update, no_update
+        return "", _status_class("idle"), True
 
     register_api(app, backend)
     if str(os.environ.get("MATTERVIS_PREWARM", "0")).lower() in {"1", "true", "yes", "on"}:
         _start_cache_prewarm(backend)
+    if str(os.environ.get("MATTERVIS_AUDIT", "0")).lower() in {"1", "true", "yes", "on"}:
+        _install_callback_audit(app)
     return app
+
+
+def _install_callback_audit(app) -> None:
+    """Log every /_dash-update-component request: which inputs changed
+    (changedPropIds), which output owner was targeted, plus the
+    response status / payload size and the originating User-Agent
+    so we can tell if a "no response" report is coming from an
+    embedded webview that does not propagate React events.
+
+    Opt-in via ``MATTERVIS_AUDIT=1``; not safe for production
+    because it parses every request body."""
+    import sys
+
+    import flask
+
+    server = app.server
+
+    @server.before_request
+    def _before():
+        flask.g._mv_t0 = time.perf_counter()
+
+    @server.after_request
+    def _after(response):
+        if flask.request.path != "/_dash-update-component":
+            return response
+        try:
+            payload = flask.request.get_json(silent=True) or {}
+            changed = payload.get("changedPropIds") or []
+        except Exception:
+            changed = []
+        # Sample polls 1/100 so the log stays useful; always log everything else.
+        if changed == ["agent-state-poll.n_intervals"]:
+            counter = getattr(flask.g, "_mv_poll_n", 0) + 1
+            try:
+                flask.g._mv_poll_n = counter
+            except Exception:
+                pass
+            if counter % 100 != 1:
+                return response
+        t0 = getattr(flask.g, "_mv_t0", None)
+        dt_ms = ((time.perf_counter() - t0) * 1000.0) if t0 is not None else -1.0
+        ip = flask.request.headers.get("X-Forwarded-For") or flask.request.remote_addr or "?"
+        ua = (flask.request.headers.get("User-Agent") or "?")[:80]
+        out_id = payload.get("output", "")[:120]
+        try:
+            resp_len = len(response.get_data())
+        except Exception:
+            resp_len = -1
+        sys.stdout.write(
+            f"[mv-audit] ip={ip} ua={ua!r} {dt_ms:7.1f}ms status={response.status_code} resp={resp_len}B "
+            f"changed={changed} out={out_id}\n"
+        )
+        sys.stdout.flush()
+        return response
 
 
 def _start_cache_prewarm(backend: ViewerBackend) -> None:
@@ -1740,7 +2119,7 @@ def main(argv=None):
     args = _build_parser().parse_args(argv)
     app = create_app(args.preset, names=args.structure, root_dir=WORKSPACE_DIR, cif_paths=args.cif or [])
     print(f"Serving crystal viewer at http://{args.host}:{args.port}")
-    app.run(host=args.host, port=args.port, debug=False)
+    app.run(host=args.host, port=args.port, debug=False, threaded=True)
 
 
 if __name__ == "__main__":
