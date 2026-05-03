@@ -6,6 +6,8 @@ from typing import Dict, Iterable, Tuple
 import numpy as np
 import plotly.graph_objects as go
 
+from .presets import ORTEP_MODES
+
 
 MATERIAL_DISPATCH = {"flat": "_scatter_atom_base", "mesh": "_mesh3d_atom_base"}
 STYLE_DISPATCH = {
@@ -28,16 +30,22 @@ def validate_style_schema(style: dict) -> dict:
     material = str(style.get("material", "mesh"))
     render_style = str(style.get("style", "ball_stick"))
     disorder = str(style.get("disorder", "outline_rings"))
+    ortep_mode = style.get("ortep_mode")
     if material not in MATERIAL_DISPATCH:
         raise ValueError(f"unknown material: {material}")
     if render_style not in STYLE_DISPATCH:
         raise ValueError(f"unknown style: {render_style}")
     if disorder not in DISORDER_DISPATCH:
         raise ValueError(f"unknown disorder mode: {disorder}")
+    if ortep_mode is not None and str(ortep_mode) not in ORTEP_MODES:
+        raise ValueError(f"unknown ORTEP mode: {ortep_mode}")
     normalized = dict(style)
     normalized["material"] = material
     normalized["style"] = render_style
     normalized["disorder"] = disorder
+    if ortep_mode is not None:
+        normalized["ortep_mode"] = str(ortep_mode)
+        normalized.update(ORTEP_MODES[normalized["ortep_mode"]])
     normalized["fast_rendering"] = bool(normalized.get("fast_rendering", False)) or material == "flat"
     normalized["minor_wireframe"] = bool(normalized.get("minor_wireframe", False)) or disorder == "outline_rings"
     return normalized
@@ -49,6 +57,10 @@ def _minor_opacity_for(style: dict, is_minor: bool) -> float:
     if style.get("disorder") == "opacity":
         return max(0.05, float(style.get("minor_opacity", 0.35)))
     return 1.0
+
+
+def _style_color(color: str, style: dict) -> str:
+    return "#000000" if style.get("monochrome", False) else color
 
 
 def _normalize(vec: Iterable[float], fallback: Iterable[float]) -> np.ndarray:
@@ -244,6 +256,7 @@ def style_from_controls(
     material: str | None = None,
     render_style: str | None = None,
     disorder: str | None = None,
+    ortep_mode: str | None = None,
 ) -> dict:
     options = set(options or [])
     resolved_material = material or ("flat" if "fast_rendering" in options else "mesh")
@@ -264,7 +277,10 @@ def style_from_controls(
         "show_unit_cell": "unit_cell_box" in options,
         "fast_rendering": "fast_rendering" in options,
         "topology_enabled": "topology" in options,
+        "monochrome": "monochrome" in options,
     }
+    if ortep_mode is not None:
+        style["ortep_mode"] = ortep_mode
     return validate_style_schema(style)
 
 
@@ -436,8 +452,19 @@ def _bond_segments(scene: dict, style: dict):
         start = np.array(bond["start"], dtype=float)
         end = np.array(bond["end"], dtype=float)
         mid = (start + end) / 2.0
-        yield bond["color_i"], bond["is_minor"], start, mid
-        yield bond["color_j"], bond["is_minor"], mid, end
+        halves = [
+            (_style_color(bond["color_i"], style), bond["is_minor"], start, mid),
+            (_style_color(bond["color_j"], style), bond["is_minor"], mid, end),
+        ]
+        for color, is_minor, seg_start, seg_end in halves:
+            if is_minor and style.get("disorder") == "dashed_bonds":
+                length = float(np.linalg.norm(seg_end - seg_start))
+                dash_len = max(0.08, 0.22 * length)
+                gap_len = max(0.05, 0.14 * length)
+                for dash_start, dash_end in _dashed_segments([(seg_start, seg_end)], dash_len=dash_len, gap_len=gap_len):
+                    yield color, is_minor, dash_start, dash_end
+            else:
+                yield color, is_minor, seg_start, seg_end
 
 
 def _bond_mesh_traces(scene: dict, style: dict):
@@ -499,7 +526,7 @@ def _atom_mesh_traces(scene: dict, style: dict):
     for atom in scene["draw_atoms"]:
         if style.get("show_minor_only", False) and not atom["is_minor"]:
             continue
-        key = (atom["color"], atom["is_minor"])
+        key = (_style_color(atom["color"], style), atom["is_minor"])
         groups.setdefault(key, {"centers": [], "radii": []})
         radius = float(atom["atom_radius"]) * float(style["atom_scale"])
         if atom["is_minor"]:
@@ -552,7 +579,11 @@ def _bond_scatter_traces(scene: dict, style: dict):
                 y=ys,
                 z=zs,
                 mode="lines",
-                line=dict(color=color, width=base_width * (float(style.get("minor_bond_scale", 0.82)) if is_minor else 1.0)),
+                line=dict(
+                    color=color,
+                    width=base_width * (float(style.get("minor_bond_scale", 0.82)) if is_minor else 1.0),
+                    dash="dash" if is_minor and style.get("disorder") == "dashed_bonds" else "solid",
+                ),
                 opacity=_minor_opacity_for(style, is_minor),
                 hoverinfo="skip",
                 showlegend=False,
@@ -569,7 +600,7 @@ def _atom_scatter_traces(scene: dict, style: dict):
         key = (atom["elem"], atom["is_minor"])
         groups.setdefault(
             key,
-            {"x": [], "y": [], "z": [], "size": [], "text": [], "color": atom["color"], "customdata": []},
+            {"x": [], "y": [], "z": [], "size": [], "text": [], "color": _style_color(atom["color"], style), "customdata": []},
         )
         base_size = max(10.0, 95.0 * atom["atom_radius"] * float(style["atom_scale"]))
         groups[key]["x"].append(float(atom["cart"][0]))
@@ -613,6 +644,14 @@ def _minor_bond_wireframe_traces(scene: dict, style: dict):
         segments.append((np.array(bond["start"], dtype=float), np.array(bond["end"], dtype=float)))
     if not segments:
         return []
+    if style.get("disorder") == "dashed_bonds":
+        lengths = [float(np.linalg.norm(end - start)) for start, end in segments]
+        typical = float(np.median(lengths)) if lengths else 1.0
+        segments = _dashed_segments(
+            segments,
+            dash_len=max(0.08, 0.18 * typical),
+            gap_len=max(0.05, 0.12 * typical),
+        )
     radius = max(0.015, 0.55 * float(style["bond_radius"]))
     trace = _segment_cylinder_trace(
         segments,
@@ -623,6 +662,57 @@ def _minor_bond_wireframe_traces(scene: dict, style: dict):
         name="minor-bond-wireframe",
     )
     return [trace] if trace is not None else []
+
+
+def _wireframe_atom_traces(scene: dict, style: dict):
+    groups: Dict[Tuple[str, bool], list[tuple[np.ndarray, np.ndarray]]] = {}
+    axes = [
+        np.array([1.0, 0.0, 0.0]),
+        np.array([0.0, 1.0, 0.0]),
+        np.array([0.0, 0.0, 1.0]),
+    ]
+    for atom in scene["draw_atoms"]:
+        if style.get("show_minor_only", False) and not atom["is_minor"]:
+            continue
+        radius = max(0.05, float(atom["atom_radius"]) * float(style["atom_scale"]))
+        key = (_style_color(atom["color"], style), atom["is_minor"])
+        bucket = groups.setdefault(key, [])
+        center = np.asarray(atom["cart"], dtype=float)
+        for axis in axes:
+            bucket.extend(_ring_segments(center, radius, axis, segments=18))
+
+    traces = []
+    for (color, is_minor), segments in groups.items():
+        trace = _segment_cylinder_trace(
+            segments,
+            radius=max(0.008, 0.065 * float(style["bond_radius"])),
+            color=color,
+            opacity=_minor_opacity_for(style, is_minor),
+            sides=4,
+            name="wireframe-atoms",
+        )
+        if trace is not None:
+            traces.append(trace)
+    return traces
+
+
+def _wireframe_bond_traces(scene: dict, style: dict):
+    groups: Dict[Tuple[str, bool], list[tuple[np.ndarray, np.ndarray]]] = {}
+    for color, is_minor, start, end in _bond_segments(scene, style):
+        groups.setdefault((color, is_minor), []).append((start, end))
+    traces = []
+    for (color, is_minor), segments in groups.items():
+        trace = _segment_cylinder_trace(
+            segments,
+            radius=max(0.01, 0.40 * float(style["bond_radius"])),
+            color=color,
+            opacity=_minor_opacity_for(style, is_minor),
+            sides=4,
+            name="wireframe-bonds",
+        )
+        if trace is not None:
+            traces.append(trace)
+    return traces
 
 
 def _ring_segments(center: np.ndarray, radius: float, axis: np.ndarray, *, segments: int = 14):
@@ -741,6 +831,8 @@ def _label_traces(scene: dict, style: dict):
     cache = scene.setdefault("_label_trace_cache", {})
     key = (
         bool(style.get("show_minor_only", False)),
+        bool(style.get("monochrome", False)),
+        str(style.get("label_color", "#111111")),
         round(float(style.get("label_font_size", 12)), 3),
     )
     if key in cache:
@@ -749,8 +841,9 @@ def _label_traces(scene: dict, style: dict):
     # minor-disorder flag, which read as inconsistent typography rather than
     # signalling "minor"). Disorder is conveyed by colour only; size stays uniform.
     label_size = float(style.get("label_font_size", 12))
+    major_label_color = style.get("label_color", "#111111")
     buckets = {
-        False: {"x": [], "y": [], "z": [], "text": [], "color": "#111111"},
+        False: {"x": [], "y": [], "z": [], "text": [], "color": major_label_color},
         True: {"x": [], "y": [], "z": [], "text": [], "color": "#999999"},
     }
     for item in scene["label_items"]:
@@ -1613,6 +1706,8 @@ def _cached_atom_bond_meshes(scene: dict, style: dict, *, use_fast: bool):
         str(style.get("material", "mesh")),
         str(style.get("style", "ball_stick")),
         str(style.get("disorder", "outline_rings")),
+        str(style.get("ortep_mode", "")),
+        bool(style.get("monochrome", False)),
         bool(style.get("show_minor_only", False)),
         round(float(style.get("atom_scale", 1.0)), 3),
         round(float(style.get("bond_radius", 0.1)), 3),
@@ -1622,7 +1717,10 @@ def _cached_atom_bond_meshes(scene: dict, style: dict, *, use_fast: bool):
     )
     if key in cache:
         return cache[key]
-    if style.get("style") == "ortep":
+    if style.get("style") == "wireframe":
+        atom_traces = _wireframe_atom_traces(scene, style)
+        bond_traces = _wireframe_bond_traces(scene, style)
+    elif style.get("style") == "ortep":
         from .ortep import ortep_atom_billboard_traces, ortep_atom_mesh_traces, ortep_axis_dash_traces, ortep_octant_shade_traces
 
         atom_traces = ortep_atom_billboard_traces(scene, style) if use_fast else ortep_atom_mesh_traces(scene, style)

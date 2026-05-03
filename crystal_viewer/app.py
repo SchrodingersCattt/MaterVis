@@ -90,9 +90,15 @@ def _structure_summary(scene: dict) -> str:
         return "No structure loaded yet. Upload a CIF to begin."
     minor_atoms = sum(1 for atom in scene["draw_atoms"] if atom["is_minor"])
     minor_bonds = sum(1 for bond in scene["bonds"] if bond["is_minor"])
+    overflow_count = len(scene.get("unwrap_overflow") or [])
+    overflow_text = (
+        f" {overflow_count} fragment(s) kept wrapped after exceeding the unwrap cap."
+        if overflow_count
+        else ""
+    )
     if minor_atoms:
-        return f"Disorder detected: {minor_atoms} minor atoms, {minor_bonds} minor bonds."
-    return "Disorder: none detected."
+        return f"Disorder detected: {minor_atoms} minor atoms, {minor_bonds} minor bonds.{overflow_text}"
+    return f"Disorder: none detected.{overflow_text}"
 
 
 def _display_options_from_style(style: dict) -> list[str]:
@@ -105,6 +111,7 @@ def _display_options_from_style(style: dict) -> list[str]:
             (style.get("minor_wireframe", False), "minor_wireframe"),
             (style.get("show_hydrogen", False), "hydrogens"),
             (style.get("show_unit_cell", False), "unit_cell_box"),
+            (style.get("monochrome", False), "monochrome"),
         )
         if enabled
     ]
@@ -301,6 +308,7 @@ class ViewerBackend:
             "material": str(style.get("material", "mesh")),
             "style": str(style.get("style", "ball_stick")),
             "disorder": str(style.get("disorder", "outline_rings")),
+            "ortep_mode": str(style.get("ortep_mode", "ortep_axes")),
             "axis_scale": float(style["axis_scale"]),
             "display_options": _display_options_from_style(style),
             "display_mode": style.get("display_mode", scene.get("display_mode", "formula_unit")),
@@ -578,7 +586,7 @@ class ViewerBackend:
         for key in ("atom_scale", "bond_radius", "minor_opacity", "axis_scale", "cutoff"):
             if key in patch and patch[key] is not None:
                 state[key] = float(patch[key])
-        for key in ("material", "style", "disorder"):
+        for key in ("material", "style", "disorder", "ortep_mode"):
             if key in patch and patch[key] is not None:
                 state[key] = str(patch[key])
         if "display_options" in patch and patch["display_options"] is not None:
@@ -695,12 +703,14 @@ class ViewerBackend:
                 material=state.get("material"),
                 render_style=state.get("style"),
                 disorder=state.get("disorder"),
+                ortep_mode=state.get("ortep_mode"),
             )
         )
         style["display_mode"] = state.get("display_mode", scene.get("display_mode", "formula_unit"))
         style["material"] = state.get("material", style.get("material", "mesh"))
         style["style"] = state.get("style", style.get("style", "ball_stick"))
         style["disorder"] = state.get("disorder", style.get("disorder", "outline_rings"))
+        style["ortep_mode"] = state.get("ortep_mode", style.get("ortep_mode", "ortep_axes"))
         style["fast_rendering"] = bool(state.get("fast_rendering", False)) or style["material"] == "flat"
         style["topology_enabled"] = bool(state.get("topology_enabled", True))
         style["topology_hull_color"] = str(state.get("topology_hull_color", "#7C5CBF"))
@@ -1249,6 +1259,7 @@ def create_app(
                             {"label": "Minor Only", "value": "minor_only"},
                             {"label": "Hydrogens", "value": "hydrogens"},
                             {"label": "Unit Cell Box", "value": "unit_cell_box"},
+                            {"label": "Monochrome atoms", "value": "monochrome"},
                         ],
                         value=first_state["display_options"],
                     ),
@@ -1294,6 +1305,18 @@ def create_app(
                             ),
                         ],
                         style={"display": "flex", "gap": "6px", "marginBottom": "10px"},
+                    ),
+                    html.Label("ORTEP Draw Mode"),
+                    dcc.Dropdown(
+                        id="ortep-mode-selector",
+                        options=[
+                            {"label": "Solid ellipsoids", "value": "ortep_solid"},
+                            {"label": "Principal axes", "value": "ortep_axes"},
+                            {"label": "Octant shading", "value": "ortep_octant"},
+                        ],
+                        value=first_state.get("ortep_mode", "ortep_axes"),
+                        clearable=False,
+                        style={"marginBottom": "10px"},
                     ),
                     html.Label("Atom Scale"),
                     dcc.Slider(
@@ -1515,6 +1538,7 @@ def create_app(
             state.get("material", "mesh"),
             state.get("style", "ball_stick"),
             state.get("disorder", "outline_rings"),
+            state.get("ortep_mode", "ortep_axes"),
             state["axis_scale"],
             list(state.get("topology_species_keys") or []),
             state["topology_site_index"],
@@ -1765,6 +1789,7 @@ def create_app(
         Output("material-selector", "value"),
         Output("style-selector", "value"),
         Output("disorder-selector", "value"),
+        Output("ortep-mode-selector", "value"),
         Output("axis-scale-slider", "value"),
         Output("topology-species", "value"),
         Output("topology-site-index", "value"),
@@ -1784,7 +1809,7 @@ def create_app(
         )
         if triggered == "scene-tabs":
             if not scene_id:
-                return (no_update,) * 18
+                return (no_update,) * 19
             backend.set_active_scene(scene_id, broadcast=False)
             state = backend.get_state(scene_id)
             return (
@@ -1794,7 +1819,7 @@ def create_app(
             )
         state = backend.pop_pending_state()
         if not state:
-            return (no_update,) * 18
+            return (no_update,) * 19
         return (
             backend.scene_tabs(),
             state.get("scene_id") or backend.active_scene_id(),
@@ -1812,6 +1837,7 @@ def create_app(
         Input("material-selector", "value"),
         Input("style-selector", "value"),
         Input("disorder-selector", "value"),
+        Input("ortep-mode-selector", "value"),
         Input("axis-scale-slider", "value"),
         Input("topology-species", "value"),
         Input("topology-site-index", "value"),
@@ -1829,6 +1855,7 @@ def create_app(
         material,
         render_style,
         disorder,
+        ortep_mode,
         axis_scale,
         species_keys,
         site_index,
@@ -1850,6 +1877,7 @@ def create_app(
             "material": material or "mesh",
             "style": render_style or "ball_stick",
             "disorder": disorder or "outline_rings",
+            "ortep_mode": ortep_mode or "ortep_axes",
             "axis_scale": axis_scale,
             "topology_species_keys": list(species_keys or []),
             "topology_site_index": None if site_index in ("", None) else int(site_index),

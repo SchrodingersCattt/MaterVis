@@ -42,6 +42,9 @@ def apply_element_colors(
     The scene is modified in place and also returned for chaining. A ``None``
     or empty dict is a no-op.
     """
+    if scene.get("style", {}).get("monochrome"):
+        element_colors = {atom.get("elem", ""): "#000000" for atom in scene.get("draw_atoms", [])}
+        element_colors_light = dict(element_colors)
     if not element_colors and not element_colors_light:
         return scene
     ec = element_colors or {}
@@ -186,16 +189,12 @@ def _whole_components_in_box(ops: Any, atoms, M, cell):
     return atoms_out
 
 
-def _selected_atoms_for_mode(ops: Any, atoms, M, cell, display_mode: str, formula_unit_atoms=None):
+def _selected_atoms_for_mode(ops: Any, atoms, M, cell, display_mode: str, formula_unit_atoms=None, unwrapped_atoms=None):
+    continuous_atoms = unwrapped_atoms if unwrapped_atoms else atoms
     if display_mode == "unit_cell":
-        # Unit-cell mode promises the conventional-cell atom set with PBC
-        # bond imaging, not a locally reassembled molecular cluster. Returning
-        # the parsed cell directly avoids an O(N bonds + components) molecule
-        # reassembly pass on every first scope switch; bonds are still drawn
-        # with periodic endpoints below.
-        return [dict(atom) for atom in atoms]
+        return [dict(atom) for atom in continuous_atoms]
     if display_mode == "asymmetric_unit":
-        return _asymmetric_unit_atoms(atoms)
+        return _asymmetric_unit_atoms(continuous_atoms)
     if display_mode == "cluster":
         # Molecular cluster / isolated fragment: show every atom as parsed,
         # with no formula-unit trimming or periodic-image reassembly. Bonds
@@ -212,7 +211,7 @@ def _selected_atoms_for_mode(ops: Any, atoms, M, cell, display_mode: str, formul
 
 def _bond_endpoints(ai, aj, cell, display_mode: str):
     start = np.array(ai["cart"], dtype=float)
-    if display_mode in ("formula_unit", "cluster"):
+    if display_mode in ("formula_unit", "cluster") or (ai.get("_unwrapped") and aj.get("_unwrapped")):
         # Plain Euclidean endpoints. For clusters the atoms are already
         # expressed in Cartesian coordinates with no periodic imaging.
         end = np.array(aj["cart"], dtype=float)
@@ -234,6 +233,7 @@ def build_scene_from_atoms(
     display_mode: str = "formula_unit",
     ops=None,
     formula_unit_atoms=None,
+    unwrapped_atoms=None,
 ) -> Dict[str, Any]:
     ops = scene_ops() if ops is None else ops
     preset = default_preset() if preset is None else preset
@@ -253,6 +253,7 @@ def build_scene_from_atoms(
         cell,
         display_mode=display_mode,
         formula_unit_atoms=formula_unit_atoms,
+        unwrapped_atoms=unwrapped_atoms,
     )
     draw_atoms = [dict(atom) for atom in sel_atoms if show_h or atom["elem"] != "H"]
 
@@ -380,6 +381,7 @@ def build_scene_from_cif(
         display_mode=display_mode,
         ops=ops,
         formula_unit_atoms=formula_unit_atoms,
+        unwrapped_atoms=None,
     )
     scene["cif_path"] = cif_path
     scene["view_direction"] = np.array(view_dir, dtype=float)

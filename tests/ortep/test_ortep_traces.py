@@ -11,6 +11,7 @@ from crystal_viewer.ortep import (
     _atom_u,
     ortep_atom_mesh_traces,
     ortep_axis_dash_traces,
+    ortep_octant_shade_traces,
 )
 
 
@@ -31,6 +32,27 @@ def test_ortep_traces_include_mesh_and_optional_axes():
     assert ortep_atom_mesh_traces(scene, style)
     assert ortep_axis_dash_traces(scene, style)
     assert not ortep_axis_dash_traces(scene, {**style, "ortep_show_principal_axes": False})
+    assert ortep_octant_shade_traces(scene, {**style, "ortep_octant_shading": True})
+
+
+# === DO NOT REMOVE WITHOUT READING THIS COMMENT ===============================
+#
+# These tests guard the visual Uiso clamp on ORTEP ellipsoids. Without
+# the clamp, CIFs that encode disorder by inflating Uiso (Materials
+# Studio exports, legacy SHELX, parts of the DAP-4 / NH4-perchlorate
+# family) render disordered NH4 hydrogens as huge white spheres that
+# swallow the rest of the scene.
+#
+# This regression has been fixed and re-broken at least twice by
+# unrelated rewrites of ortep._atom_u. If you are deleting either
+# DEFAULT_HYDROGEN_ORTEP_UISO, MAX_ORTEP_UISO_BY_ELEMENT, the
+# _clamp_u_for_visualisation helper, or these tests, please re-read
+# the H-cap discussion in the PR that introduced them and either
+# replace the clamp with an equivalent guard or document why it is
+# safe to drop. The "this site is disordered" cue belongs on the
+# disorder rendering axis (outline rings / opacity), NOT on
+# ellipsoid size.
+# ==============================================================================
 
 
 def test_ortep_fallback_uiso_shrinks_hydrogen():
