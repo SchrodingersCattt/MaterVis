@@ -9,6 +9,32 @@ import plotly.graph_objects as go
 
 CHI2_3D_50 = 2.3659738843753377
 CHI2_2D_50 = 1.3862943611198906
+DEFAULT_ORTEP_UISO = 0.04
+DEFAULT_HYDROGEN_ORTEP_UISO = 0.012
+
+# Visualization-only Uiso ceilings. Some CIFs (Materials Studio,
+# legacy SHELX exports, etc.) approximate disordered or split-site
+# atoms by inflating Uiso to 0.20-0.25 instead of writing proper
+# PART/disorder records. Rendering those as honest-to-physics ORTEP
+# ellipsoids produces giant white blobs that swallow whole NH4 cations.
+# Mercury/OLEX2 deal with this by clipping the visible ellipsoid size
+# for atoms whose Uiso clearly exceeds physical room-temperature
+# thermal motion. Same convention here. The cap is visualization-only:
+# the underlying scene/CIF data is untouched.
+#
+# IMPORTANT: do NOT remove this clamp without coordinating with the
+# scene-tab/disorder UX. The "this site is disordered" cue belongs on
+# a separate axis (the disorder selector: outline rings / opacity),
+# not on ellipsoid size. Hydrogen cap is intentionally tight: a typical
+# refined H sits at Uiso 0.02-0.03; anything larger is almost always
+# disorder. Capping at 0.025 makes disordered ammonium / water
+# hydrogens render the same size as ordered C-H atoms in the same
+# scene -- which is what users expect.
+MAX_ORTEP_UISO_BY_ELEMENT = {
+    "H": 0.025,
+    "D": 0.025,
+}
+DEFAULT_MAX_ORTEP_UISO = 0.08
 
 
 def _probability_scale(probability: float, *, dimensions: int) -> float:
@@ -48,7 +74,7 @@ def _normal_ppf(p: float) -> float:
 
 def _as_u_matrix(U: Iterable[Iterable[float]] | None, *, uiso: float | None = None) -> np.ndarray:
     if U is None:
-        u = 0.04 if uiso is None else max(float(uiso), 1e-6)
+        u = DEFAULT_ORTEP_UISO if uiso is None else max(float(uiso), 1e-6)
         return np.eye(3, dtype=float) * u
     mat = np.asarray(U, dtype=float)
     if mat.shape != (3, 3):
@@ -149,8 +175,49 @@ def ortep_octant_shading(center, U, view_dir, *, probability: float = 0.5, uiso:
     return octants
 
 
+def _atom_element(atom: dict) -> str:
+    return str(atom.get("elem") or atom.get("element") or "").strip().capitalize()
+
+
+def _default_uiso_for_atom(atom: dict) -> float:
+    if _atom_element(atom) == "H":
+        return DEFAULT_HYDROGEN_ORTEP_UISO
+    return DEFAULT_ORTEP_UISO
+
+
+def _max_visual_uiso_for_atom(atom: dict) -> float:
+    return MAX_ORTEP_UISO_BY_ELEMENT.get(_atom_element(atom), DEFAULT_MAX_ORTEP_UISO)
+
+
+def _clamp_u_for_visualisation(U, uiso: float, atom: dict) -> tuple:
+    """Cap the *visual* size of an ellipsoid without touching the
+    underlying ADP data.
+
+    Returns ``(U_for_render, uiso_for_render)``. For pure-Uiso atoms
+    we just clip the scalar against the per-element ceiling. For
+    anisotropic U we scale the whole matrix down so its largest
+    eigenvalue stops exceeding the ceiling, preserving the principal
+    directions and the *shape* of the ellipsoid; only its overall
+    magnitude is clamped. This matches Mercury/OLEX2 behaviour for
+    rogue "exploded" ellipsoids that come from disorder-as-Uiso hacks.
+    """
+
+    cap = _max_visual_uiso_for_atom(atom)
+    if U is None:
+        return None, min(float(uiso), cap)
+    mat = np.asarray(U, dtype=float)
+    eigvals = np.linalg.eigvalsh((mat + mat.T) / 2.0)
+    max_eig = float(eigvals.max(initial=0.0))
+    if max_eig > cap and max_eig > 0.0:
+        mat = mat * (cap / max_eig)
+    return mat, min(float(uiso), cap)
+
+
 def _atom_u(atom: dict):
-    return atom.get("U"), float(atom.get("uiso", 0.04) or 0.04)
+    uiso = atom.get("uiso")
+    if uiso is None or float(uiso) <= 0.0:
+        uiso = _default_uiso_for_atom(atom)
+    return _clamp_u_for_visualisation(atom.get("U"), float(uiso), atom)
 
 
 def _atom_color(atom: dict, style: dict) -> str:
