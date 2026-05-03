@@ -15,22 +15,20 @@ DEFAULT_HYDROGEN_ORTEP_UISO = 0.012
 # Visualization-only Uiso ceilings. Some CIFs (Materials Studio,
 # legacy SHELX exports, etc.) approximate disordered or split-site
 # atoms by inflating Uiso to 0.20-0.25 instead of writing proper
-# PART/disorder records. Rendering those as honest-to-physics ORTEP
-# ellipsoids produces giant white blobs that swallow whole NH4 cations.
-# Mercury/OLEX2 deal with this by clipping the visible ellipsoid size
-# for atoms whose Uiso clearly exceeds physical room-temperature
-# thermal motion. Same convention here. The cap is visualization-only:
-# the underlying scene/CIF data is untouched.
-#
-# IMPORTANT: do NOT remove this clamp without coordinating with the
-# scene-tab/disorder UX. The "this site is disordered" cue belongs on
-# a separate axis (the disorder selector: outline rings / opacity),
-# not on ellipsoid size. Hydrogen cap is intentionally tight: a typical
-# refined H sits at Uiso 0.02-0.03; anything larger is almost always
-# disorder. Capping at 0.025 makes disordered ammonium / water
-# hydrogens render the same size as ordered C-H atoms in the same
-# scene -- which is what users expect.
+# PART/disorder records; rendering those as honest-to-physics ORTEP
+# ellipsoids produces gigantic white blobs that swallow the whole
+# scene. Mercury and OLEX2 deal with this by clamping the visible
+# ellipsoid size for atoms whose Uiso clearly exceeds physical room-
+# temperature thermal motion. We adopt the same convention. The cap
+# only affects rendering; the underlying scene/CIF data is untouched.
 MAX_ORTEP_UISO_BY_ELEMENT = {
+    # Hydrogen cap is intentionally tight: a typical "well-behaved"
+    # X-ray hydrogen sits at Uiso ~ 0.02-0.03; anything larger is
+    # almost always a disorder placeholder. Capping at 0.025 makes
+    # disordered ammonium / water hydrogens render at the same size
+    # as ordered C-H atoms in the same scene -- which is what users
+    # expect. The "this site is disordered" cue belongs on a
+    # separate axis (outline rings, opacity), not on ellipsoid size.
     "H": 0.025,
     "D": 0.025,
 }
@@ -198,8 +196,8 @@ def _clamp_u_for_visualisation(U, uiso: float, atom: dict) -> tuple:
     anisotropic U we scale the whole matrix down so its largest
     eigenvalue stops exceeding the ceiling, preserving the principal
     directions and the *shape* of the ellipsoid; only its overall
-    magnitude is clamped. This matches Mercury/OLEX2 behaviour for
-    rogue "exploded" ellipsoids that come from disorder-as-Uiso hacks.
+    magnitude is clamped. This is what Mercury/OLEX2 do for rogue
+    "exploded" ellipsoids that come from disorder-as-Uiso hacks.
     """
 
     cap = _max_visual_uiso_for_atom(atom)
