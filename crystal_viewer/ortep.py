@@ -12,6 +12,21 @@ CHI2_2D_50 = 1.3862943611198906
 DEFAULT_ORTEP_UISO = 0.04
 DEFAULT_HYDROGEN_ORTEP_UISO = 0.012
 
+# Visualization-only Uiso ceilings. Some CIFs (Materials Studio,
+# legacy SHELX exports, etc.) approximate disordered or split-site
+# atoms by inflating Uiso to 0.20-0.25 instead of writing proper
+# PART/disorder records; rendering those as honest-to-physics ORTEP
+# ellipsoids produces gigantic white blobs that swallow the whole
+# scene. Mercury and OLEX2 deal with this by clamping the visible
+# ellipsoid size for atoms whose Uiso clearly exceeds physical room-
+# temperature thermal motion. We adopt the same convention. The cap
+# only affects rendering; the underlying scene/CIF data is untouched.
+MAX_ORTEP_UISO_BY_ELEMENT = {
+    "H": 0.05,
+    "D": 0.05,
+}
+DEFAULT_MAX_ORTEP_UISO = 0.08
+
 
 def _probability_scale(probability: float, *, dimensions: int) -> float:
     p = float(probability)
@@ -151,18 +166,49 @@ def ortep_octant_shading(center, U, view_dir, *, probability: float = 0.5, uiso:
     return octants
 
 
+def _atom_element(atom: dict) -> str:
+    return str(atom.get("elem") or atom.get("element") or "").strip().capitalize()
+
+
 def _default_uiso_for_atom(atom: dict) -> float:
-    elem = str(atom.get("elem") or atom.get("element") or "").strip().capitalize()
-    if elem == "H":
+    if _atom_element(atom) == "H":
         return DEFAULT_HYDROGEN_ORTEP_UISO
     return DEFAULT_ORTEP_UISO
 
 
+def _max_visual_uiso_for_atom(atom: dict) -> float:
+    return MAX_ORTEP_UISO_BY_ELEMENT.get(_atom_element(atom), DEFAULT_MAX_ORTEP_UISO)
+
+
+def _clamp_u_for_visualisation(U, uiso: float, atom: dict) -> tuple:
+    """Cap the *visual* size of an ellipsoid without touching the
+    underlying ADP data.
+
+    Returns ``(U_for_render, uiso_for_render)``. For pure-Uiso atoms
+    we just clip the scalar against the per-element ceiling. For
+    anisotropic U we scale the whole matrix down so its largest
+    eigenvalue stops exceeding the ceiling, preserving the principal
+    directions and the *shape* of the ellipsoid; only its overall
+    magnitude is clamped. This is what Mercury/OLEX2 do for rogue
+    "exploded" ellipsoids that come from disorder-as-Uiso hacks.
+    """
+
+    cap = _max_visual_uiso_for_atom(atom)
+    if U is None:
+        return None, min(float(uiso), cap)
+    mat = np.asarray(U, dtype=float)
+    eigvals = np.linalg.eigvalsh((mat + mat.T) / 2.0)
+    max_eig = float(eigvals.max(initial=0.0))
+    if max_eig > cap and max_eig > 0.0:
+        mat = mat * (cap / max_eig)
+    return mat, min(float(uiso), cap)
+
+
 def _atom_u(atom: dict):
     uiso = atom.get("uiso")
-    if uiso is None:
+    if uiso is None or float(uiso) <= 0.0:
         uiso = _default_uiso_for_atom(atom)
-    return atom.get("U"), float(uiso or _default_uiso_for_atom(atom))
+    return _clamp_u_for_visualisation(atom.get("U"), float(uiso), atom)
 
 
 def ortep_atom_mesh_traces(scene: dict, style: dict):
