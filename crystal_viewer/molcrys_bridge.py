@@ -31,6 +31,7 @@ def _require_molcryskit():
         from molcrys_kit.structures.molecule import CrystalMolecule
         from molcrys_kit.analysis.stoichiometry import StoichiometryAnalyzer
         from molcrys_kit.analysis.interactions import get_bonding_threshold
+        from molcrys_kit.utils.geometry import unwrap_positions_along_bonds
         from molcrys_kit.constants import (
             get_atomic_radius,
             has_atomic_radius,
@@ -57,6 +58,7 @@ def _require_molcryskit():
         "MolecularCrystal": MolecularCrystal,
         "CrystalMolecule": CrystalMolecule,
         "StoichiometryAnalyzer": StoichiometryAnalyzer,
+        "unwrap_positions_along_bonds": unwrap_positions_along_bonds,
         "get_bonding_threshold": get_bonding_threshold,
         "get_atomic_radius": get_atomic_radius,
         "has_atomic_radius": has_atomic_radius,
@@ -162,30 +164,17 @@ def _components_with_indices(ase_atoms, mk):
     return components, graph
 
 
-def _unwrapped_positions(ase_atoms, indices, graph):
+def _unwrapped_positions(ase_atoms, indices, graph, mk, *, max_atoms=None):
     """Walk the bond graph from the smallest index outward to obtain
     PBC-continuous positions for ``indices``.
     """
-    positions = ase_atoms.get_positions()
-    out = positions[indices].copy()
-    if len(indices) <= 1:
-        return out
-    local_of = {gi: li for li, gi in enumerate(indices)}
-    visited = {indices[0]}
-    queue = [indices[0]]
-    while queue:
-        u = queue.pop(0)
-        u_local = local_of[u]
-        for v in graph.neighbors(u):
-            if v not in local_of or v in visited:
-                continue
-            small, large = (u, v) if u < v else (v, u)
-            edge_vec = graph.get_edge_data(small, large)["vector"]
-            shift = edge_vec if u == small else -edge_vec
-            out[local_of[v]] = out[u_local] + shift
-            visited.add(v)
-            queue.append(v)
-    return out
+    unwrapped, _completed = mk["unwrap_positions_along_bonds"](
+        graph,
+        indices,
+        ase_atoms.get_positions(),
+        max_atoms=max_atoms,
+    )
+    return unwrapped
 
 
 def _build_crystal_molecule(ase_atoms, indices, unwrapped_positions, mk):
@@ -235,7 +224,7 @@ class CrystalAnalysis:
         self.per_fu = per_fu
 
 
-def analyze(raw_atoms, M):
+def analyze(raw_atoms, M, *, max_atoms=None):
     """Run MolCrysKit on ``raw_atoms`` (full unit cell) and return a
     :class:`CrystalAnalysis` summarising species + per-FU counts.
     """
@@ -251,7 +240,7 @@ def analyze(raw_atoms, M):
     mol_indices = []
     mol_cart_positions = []
     for comp in components:
-        unwrapped = _unwrapped_positions(ase_atoms, comp, graph)
+        unwrapped = _unwrapped_positions(ase_atoms, comp, graph, mk, max_atoms=max_atoms)
         molecules.append(_build_crystal_molecule(ase_atoms, comp, unwrapped, mk))
         mol_indices.append(comp)
         mol_cart_positions.append(unwrapped)
