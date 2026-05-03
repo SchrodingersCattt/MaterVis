@@ -12,6 +12,9 @@ DEFAULT_STYLE = {
     "display_mode": "formula_unit",
     "atom_scale": 1.0,
     "bond_radius": 0.16,
+    "material": "mesh",
+    "style": "ball_stick",
+    "disorder": "outline_rings",
     "major_opacity": 1.0,
     "minor_opacity": 0.35,
     "minor_wireframe": False,
@@ -46,6 +49,13 @@ DEFAULT_STYLE = {
     "axis_key_italic": True,
     "fast_rendering": False,
     "topology_enabled": True,
+    "ortep_probability": 0.5,
+    "ortep_show_principal_axes": True,
+    "ortep_axis_color": "#222222",
+    "ortep_axis_linewidth": 1.6,
+    "ortep_octant_shading": False,
+    "ortep_octant_shadow_color": "#000000",
+    "ortep_octant_shadow_alpha": 0.18,
     # Optional hex-colour overrides for elements not in the vendored palette,
     # or to re-skin existing ones for publication figures. The ``elements``
     # dict takes precedence over ``elements_light`` for both primary colour
@@ -57,7 +67,7 @@ DEFAULT_STYLE = {
 DEFAULT_CATALOG = {
     "DAP-4": {
         "title": "DAP-4  (P1, Z=12)",
-        "relative_cif": os.path.join("examples", "data", "DAP-4.cif"),
+        "relative_cif": os.path.join("scripts", "data", "DAP-4.cif"),
     },
 }
 

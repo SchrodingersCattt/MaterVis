@@ -35,6 +35,7 @@ from .presets import (
 )
 from .renderer import build_figure, style_from_controls, topology_histogram_figure, topology_results_markdown
 from .scene import scene_json
+from .scenes import SceneStore
 from .topology import analyze_topology, extract_coordination_shell
 
 
@@ -217,6 +218,10 @@ class ViewerBackend:
             self.structure_names = [placeholder.name]
         first_name = self.structure_names[0]
         self.current_state = self.default_state(first_name)
+        self.scene_store = SceneStore.load(SceneStore.default_path(self.root_dir))
+        self.scene_store.ensure(self.structure_names, default_state_factory=self.default_state)
+        if self.scene_store.active_id:
+            self.current_state = self.scene_state(self.scene_store.active_id)
         self.pending_state: Optional[dict[str, Any]] = None
         self._first_figure_ready = threading.Event()
         self.version = 0
@@ -254,6 +259,9 @@ class ViewerBackend:
             "atom_scale": float(style["atom_scale"]),
             "bond_radius": float(style["bond_radius"]),
             "minor_opacity": float(style["minor_opacity"]),
+            "material": str(style.get("material", "mesh")),
+            "style": str(style.get("style", "ball_stick")),
+            "disorder": str(style.get("disorder", "outline_rings")),
             "axis_scale": float(style["axis_scale"]),
             "display_options": _display_options_from_style(style),
             "display_mode": style.get("display_mode", scene.get("display_mode", "formula_unit")),
@@ -280,6 +288,97 @@ class ViewerBackend:
             }
             for name in self.structure_names
         ]
+
+    def scene_options(self) -> list[dict[str, Any]]:
+        return self.scene_store.list()
+
+    def scene_tabs(self) -> list[Any]:
+        tabs = []
+        for scene in self.scene_store.list():
+            tabs.append(
+                dcc.Tab(
+                    label=scene["label"],
+                    value=scene["id"],
+                    id={"type": "scene-tab", "scene_id": scene["id"]},
+                )
+            )
+        return tabs
+
+    def scene_state(self, scene_id: Optional[str] = None) -> dict[str, Any]:
+        scene = self.scene_store.get(scene_id)
+        defaults = self.default_state(scene.structure_name)
+        return scene.state(defaults)
+
+    def active_scene_id(self) -> Optional[str]:
+        return self.scene_store.active_id
+
+    def create_scene(
+        self,
+        *,
+        structure: Optional[str] = None,
+        label: Optional[str] = None,
+        state: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        structure = structure or self.get_state().get("structure") or (self.structure_names[0] if self.structure_names else PLACEHOLDER_STRUCTURE)
+        if structure not in self.structure_names:
+            raise KeyError(structure)
+        base_state = self.default_state(structure)
+        if state:
+            base_state.update(self.normalize_state(state))
+        scene = self.scene_store.add(
+            label=label or structure,
+            structure_name=structure,
+            state_patch=base_state,
+            camera=base_state.get("camera"),
+        )
+        self.current_state = self.scene_state(scene.id)
+        self.pending_state = copy.deepcopy(self.current_state)
+        self._bump_version()
+        return scene.to_dict()
+
+    def update_scene(self, scene_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        scene = self.scene_store.get(scene_id)
+        if "label" in payload and len(payload) == 1:
+            scene = self.scene_store.rename(scene_id, payload["label"])
+        else:
+            patch = dict(payload)
+            if "state" in patch:
+                state_patch = patch.pop("state") or {}
+                state_patch = self.normalize_state(state_patch, scene_id=scene_id)
+                patch.update(state_patch)
+            scene = self.scene_store.patch_scene(scene_id, patch)
+        if self.scene_store.active_id == scene_id:
+            self.current_state = self.scene_state(scene_id)
+            self.pending_state = copy.deepcopy(self.current_state)
+        self._bump_version()
+        return scene.to_dict()
+
+    def delete_scene(self, scene_id: str) -> dict[str, Any]:
+        removed = self.scene_store.remove(scene_id)
+        if self.scene_store.active_id:
+            self.current_state = self.scene_state(self.scene_store.active_id)
+        self.pending_state = copy.deepcopy(self.current_state)
+        self._bump_version()
+        return removed.to_dict()
+
+    def duplicate_scene(self, scene_id: str, label: Optional[str] = None) -> dict[str, Any]:
+        scene = self.scene_store.duplicate(scene_id, label=label)
+        self.current_state = self.scene_state(scene.id)
+        self.pending_state = copy.deepcopy(self.current_state)
+        self._bump_version()
+        return scene.to_dict()
+
+    def reorder_scenes(self, order: Iterable[str]) -> list[str]:
+        order = self.scene_store.reorder(order)
+        self._bump_version()
+        return order
+
+    def set_active_scene(self, scene_id: str) -> dict[str, Any]:
+        scene = self.scene_store.set_active(scene_id)
+        self.current_state = self.scene_state(scene.id)
+        self.pending_state = copy.deepcopy(self.current_state)
+        self._bump_version()
+        return scene.to_dict()
 
     @staticmethod
     def _species_summary(fragments: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -393,17 +492,30 @@ class ViewerBackend:
             "summary": _structure_summary(scene),
         }
 
-    def normalize_state(self, patch: Optional[dict[str, Any]]) -> dict[str, Any]:
-        state = copy.deepcopy(self.current_state)
+    def normalize_state(self, patch: Optional[dict[str, Any]], scene_id: Optional[str] = None) -> dict[str, Any]:
+        if scene_id is not None:
+            state = self.scene_state(scene_id)
+        else:
+            state = copy.deepcopy(self.current_state)
         patch = patch or {}
+        if "scene_id" in patch and patch["scene_id"] in self.scene_store.scenes:
+            scene_id = str(patch["scene_id"])
+            state = self.scene_state(scene_id)
         if "structure" in patch and patch["structure"] in self.structure_names:
             structure = patch["structure"]
             defaults = self.default_state(structure)
             state.update(defaults)
             state["structure"] = structure
+        if scene_id is not None:
+            state["scene_id"] = scene_id
+            scene = self.scene_store.get(scene_id)
+            state["scene_label"] = scene.label
         for key in ("atom_scale", "bond_radius", "minor_opacity", "axis_scale", "cutoff"):
             if key in patch and patch[key] is not None:
                 state[key] = float(patch[key])
+        for key in ("material", "style", "disorder"):
+            if key in patch and patch[key] is not None:
+                state[key] = str(patch[key])
         if "display_options" in patch and patch["display_options"] is not None:
             state["display_options"] = list(patch["display_options"])
         if "display_mode" in patch and patch["display_mode"] is not None:
@@ -418,7 +530,7 @@ class ViewerBackend:
                 state["topology_species_keys"] = [str(item) for item in value if item is not None]
         # Legacy A/B/X selection: translate the type to the matching list of
         # species formulas in the active scene so existing /api/v1 callers (and
-        # the example scripts shipped under examples/) keep working without
+        # the example scripts shipped under scripts/) keep working without
         # learning the new species-checkbox vocabulary.
         if patch.get("topology_fragment_type"):
             requested_type = str(patch["topology_fragment_type"])
@@ -451,13 +563,21 @@ class ViewerBackend:
             state["camera"] = patch["camera"]
         return state
 
-    def get_state(self) -> dict[str, Any]:
+    def get_state(self, scene_id: Optional[str] = None) -> dict[str, Any]:
         with self._lock:
+            if scene_id is not None:
+                return copy.deepcopy(self.scene_state(scene_id))
             return copy.deepcopy(self.current_state)
 
-    def patch_state(self, patch: Optional[dict[str, Any]]) -> dict[str, Any]:
+    def patch_state(self, patch: Optional[dict[str, Any]], scene_id: Optional[str] = None) -> dict[str, Any]:
         with self._lock:
-            self.current_state = self.normalize_state(patch)
+            target_scene_id = scene_id or (patch or {}).get("scene_id") or self.scene_store.active_id
+            self.current_state = self.normalize_state(patch, scene_id=target_scene_id)
+            if target_scene_id:
+                scene_payload = copy.deepcopy(self.current_state)
+                scene_payload.pop("scene_id", None)
+                scene_payload.pop("scene_label", None)
+                self.scene_store.patch_scene(target_scene_id, scene_payload)
             self.pending_state = copy.deepcopy(self.current_state)
             self._bump_version()
             return copy.deepcopy(self.current_state)
@@ -468,9 +588,15 @@ class ViewerBackend:
             self.pending_state = None
             return copy.deepcopy(pending) if pending else None
 
-    def record_state(self, patch: Optional[dict[str, Any]]) -> None:
+    def record_state(self, patch: Optional[dict[str, Any]], scene_id: Optional[str] = None) -> None:
         with self._lock:
-            self.current_state = self.normalize_state(patch)
+            target_scene_id = scene_id or (patch or {}).get("scene_id") or self.scene_store.active_id
+            self.current_state = self.normalize_state(patch, scene_id=target_scene_id)
+            if target_scene_id:
+                scene_payload = copy.deepcopy(self.current_state)
+                scene_payload.pop("scene_id", None)
+                scene_payload.pop("scene_label", None)
+                self.scene_store.patch_scene(target_scene_id, scene_payload)
             self._bump_version()
 
     def show_hydrogen_for_state(self, state: Optional[dict[str, Any]] = None) -> bool:
@@ -501,10 +627,16 @@ class ViewerBackend:
                 state["minor_opacity"],
                 state["axis_scale"],
                 state["display_options"],
+                material=state.get("material"),
+                render_style=state.get("style"),
+                disorder=state.get("disorder"),
             )
         )
         style["display_mode"] = state.get("display_mode", scene.get("display_mode", "formula_unit"))
-        style["fast_rendering"] = bool(state.get("fast_rendering", False))
+        style["material"] = state.get("material", style.get("material", "mesh"))
+        style["style"] = state.get("style", style.get("style", "ball_stick"))
+        style["disorder"] = state.get("disorder", style.get("disorder", "outline_rings"))
+        style["fast_rendering"] = bool(state.get("fast_rendering", False)) or style["material"] == "flat"
         style["topology_enabled"] = bool(state.get("topology_enabled", True))
         style["topology_hull_color"] = str(state.get("topology_hull_color", "#7C5CBF"))
         return style
@@ -519,7 +651,7 @@ class ViewerBackend:
         self._drop_placeholder()
         self.bundles[bundle.name] = bundle
         self.structure_names.append(bundle.name)
-        self.patch_state({"structure": bundle.name})
+        self.create_scene(structure=bundle.name, label=bundle.name)
         return bundle
 
     def add_uploaded_file_bytes(self, data: bytes, filename: str) -> LoadedCrystal:
@@ -537,7 +669,7 @@ class ViewerBackend:
         self._drop_placeholder()
         self.bundles[bundle.name] = bundle
         self.structure_names.append(bundle.name)
-        self.patch_state({"structure": bundle.name})
+        self.create_scene(structure=bundle.name, label=bundle.name)
         return bundle
 
     def topology_candidates(self, structure: str, fragment_type: Optional[str] = None) -> list[dict[str, Any]]:
@@ -764,8 +896,8 @@ class ViewerBackend:
             fig.update_layout(scene_camera=camera)
         return fig, topology_data
 
-    def render_current_png(self) -> bytes:
-        fig, _ = self.figure_for_state(self.get_state())
+    def render_current_png(self, scene_id: Optional[str] = None) -> bytes:
+        fig, _ = self.figure_for_state(self.get_state(scene_id))
         try:
             return pio.to_image(fig, format="png", scale=2)
         except Exception as exc:  # pragma: no cover - depends on local Chrome/Kaleido state
@@ -775,19 +907,19 @@ class ViewerBackend:
         scene = self.scene_for_state(self.get_state() if state is None else state)
         return _plotly_camera(scene.get("camera")) or _plotly_camera(None)
 
-    def get_camera(self) -> dict[str, Any]:
-        state = self.get_state()
+    def get_camera(self, scene_id: Optional[str] = None) -> dict[str, Any]:
+        state = self.get_state(scene_id)
         return _plotly_camera(state.get("camera")) or self.default_camera(state)
 
-    def set_camera(self, camera: dict[str, Any]) -> dict[str, Any]:
-        self.patch_state({"camera": camera})
-        return self.get_camera()
+    def set_camera(self, camera: dict[str, Any], scene_id: Optional[str] = None) -> dict[str, Any]:
+        self.patch_state({"camera": camera}, scene_id=scene_id)
+        return self.get_camera(scene_id)
 
-    def camera_action(self, action: str, **payload) -> dict[str, Any]:
+    def camera_action(self, action: str, scene_id: Optional[str] = None, **payload) -> dict[str, Any]:
         if action == "reset":
-            return self.set_camera(self.default_camera())
+            return self.set_camera(self.default_camera(self.get_state(scene_id)), scene_id=scene_id)
 
-        eye, center, up = _camera_vectors(self.get_camera())
+        eye, center, up = _camera_vectors(self.get_camera(scene_id))
         if action == "zoom":
             factor = float(payload.get("factor", 1.0))
             if abs(factor) > 1e-8:
@@ -811,7 +943,7 @@ class ViewerBackend:
                 eye = _rotate_vector(eye, right, pitch_deg)
                 up = _rotate_vector(up, right, pitch_deg)
         camera = _camera_payload(eye, center, up)
-        return self.set_camera(camera)
+        return self.set_camera(camera, scene_id=scene_id)
 
     def save_preset(self, path: Optional[str] = None) -> dict[str, Any]:
         state = self.get_state()
@@ -871,10 +1003,10 @@ class ViewerBackend:
             payload["output_path"] = output_path
         return payload
 
-    def query_topology(self, structure: str, center_index: int, cutoff: float = 10.0) -> dict[str, Any]:
-        state = self.get_state()
+    def query_topology(self, structure: str, center_index: int, cutoff: float = 10.0, scene_id: Optional[str] = None) -> dict[str, Any]:
+        state = self.get_state(scene_id)
         if state["structure"] != structure:
-            state = self.normalize_state({"structure": structure})
+            state = self.normalize_state({"structure": structure}, scene_id=scene_id)
         state["topology_site_index"] = center_index
         state["cutoff"] = cutoff
         return self.topology_for_state(state)
@@ -905,9 +1037,14 @@ def create_app(
         backend.bundles[bundle.name] = bundle
         if bundle.name not in backend.structure_names:
             backend.structure_names.append(bundle.name)
-    backend._drop_placeholder()
+        if not any(scene["structure_name"] == bundle.name for scene in backend.scene_options()):
+            backend.create_scene(structure=bundle.name, label=bundle.name)
+    if cif_paths:
+        backend._drop_placeholder()
     if backend.structure_names and backend.current_state.get("structure") not in backend.structure_names:
         backend.current_state = backend.default_state(backend.structure_names[0])
+    if backend.scene_store.active_id:
+        backend.current_state = backend.scene_state(backend.scene_store.active_id)
     app = Dash(__name__, assets_folder=os.path.join(PACKAGE_DIR, "assets"))
     app.crystal_backend = backend
 
@@ -925,12 +1062,32 @@ def create_app(
             html.Div(
                 [
                     html.H3("Crystal Viewer", style={"marginTop": "0"}),
-                    html.Label("Structure"),
-                    dcc.RadioItems(
-                        id="structure-selector",
-                        options=backend.structure_options(),
-                        value=first_state["structure"],
-                        labelStyle={"display": "block", "marginBottom": "4px"},
+                    html.Div(
+                        [
+                            html.Label("Scenes", style={"fontWeight": "bold"}),
+                            html.Button("+", id="scene-new-tab-btn", n_clicks=0, title="Duplicate active scene", style={"float": "right"}),
+                        ],
+                        style={"marginBottom": "4px"},
+                    ),
+                    dcc.Tabs(
+                        id="scene-tabs",
+                        value=first_state.get("scene_id") or backend.active_scene_id(),
+                        children=backend.scene_tabs(),
+                        parent_className="scene-tabs",
+                    ),
+                    html.Div(
+                        [
+                            dcc.Input(
+                                id="scene-tab-rename-input",
+                                type="text",
+                                value=first_state.get("scene_label") or first_state["structure"],
+                                placeholder="Scene label",
+                                style={"width": "68%", "marginRight": "6px"},
+                            ),
+                            html.Button("Rename", id="scene-rename-btn", n_clicks=0),
+                            html.Button("Close", id="scene-tab-close-active", n_clicks=0, style={"marginLeft": "6px"}),
+                        ],
+                        style={"marginTop": "8px", "marginBottom": "8px"},
                     ),
                     html.Div(
                         id="structure-summary",
@@ -939,7 +1096,7 @@ def create_app(
                     ),
                     html.Label("Upload CIF"),
                     dcc.Upload(
-                        id="cif-upload",
+                        id="scene-cif-upload",
                         children=html.Div(["Drag and drop CIF, or click to upload"]),
                         multiple=True,
                         style={
@@ -973,17 +1130,53 @@ def create_app(
                             {"label": "Labels", "value": "labels"},
                             {"label": "Axes", "value": "axes"},
                             {"label": "Minor Only", "value": "minor_only"},
-                            {"label": "Minor Wireframe", "value": "minor_wireframe"},
                             {"label": "Hydrogens", "value": "hydrogens"},
                             {"label": "Unit Cell Box", "value": "unit_cell_box"},
                         ],
                         value=first_state["display_options"],
                     ),
                     html.Div(style={"height": "10px"}),
-                    dcc.Checklist(
-                        id="fast-rendering-toggle",
-                        options=[{"label": "Fast rendering fallback", "value": "fast"}],
-                        value=["fast"] if first_state.get("fast_rendering") else [],
+                    html.Label("Material / Style / Disorder"),
+                    html.Div(
+                        [
+                            dcc.Dropdown(
+                                id="material-selector",
+                                options=[
+                                    {"label": "Mesh 3D", "value": "mesh"},
+                                    {"label": "Flat billboard", "value": "flat"},
+                                ],
+                                value=first_state.get("material", "mesh"),
+                                clearable=False,
+                                style={"flex": "1"},
+                            ),
+                            dcc.Dropdown(
+                                id="style-selector",
+                                options=[
+                                    {"label": "Ball-stick", "value": "ball_stick"},
+                                    {"label": "Ball", "value": "ball"},
+                                    {"label": "Stick", "value": "stick"},
+                                    {"label": "ORTEP", "value": "ortep"},
+                                    {"label": "Wireframe", "value": "wireframe"},
+                                ],
+                                value=first_state.get("style", "ball_stick"),
+                                clearable=False,
+                                style={"flex": "1"},
+                            ),
+                            dcc.Dropdown(
+                                id="disorder-selector",
+                                options=[
+                                    {"label": "Outline rings", "value": "outline_rings"},
+                                    {"label": "Opacity from occ.", "value": "opacity"},
+                                    {"label": "Dashed bonds", "value": "dashed_bonds"},
+                                    {"label": "Colour shift", "value": "color_shift"},
+                                    {"label": "None", "value": "none"},
+                                ],
+                                value=first_state.get("disorder", "outline_rings"),
+                                clearable=False,
+                                style={"flex": "1"},
+                            ),
+                        ],
+                        style={"display": "flex", "gap": "6px", "marginBottom": "10px"},
                     ),
                     html.Label("Atom Scale"),
                     dcc.Slider(
@@ -1169,11 +1362,11 @@ def create_app(
     )
 
     @app.callback(
-        Output("structure-selector", "options"),
-        Output("structure-selector", "value"),
+        Output("scene-tabs", "children"),
+        Output("scene-tabs", "value"),
         Output("upload-status", "children"),
-        Input("cif-upload", "contents"),
-        State("cif-upload", "filename"),
+        Input("scene-cif-upload", "contents"),
+        State("scene-cif-upload", "filename"),
         prevent_initial_call=True,
     )
     def upload_cif(contents_list, filenames):
@@ -1183,16 +1376,17 @@ def create_app(
         for contents, filename in zip(contents_list, filenames or []):
             bundle = backend.add_uploaded_bundle(contents, filename)
             names_out.append(bundle.name)
-        return backend.structure_options(), names_out[-1], f"Uploaded CIF(s): {', '.join(names_out)}"
+        return backend.scene_tabs(), backend.active_scene_id(), f"Uploaded CIF(s): {', '.join(names_out)}"
 
     @app.callback(
         Output("topology-species", "options"),
         Output("topology-species", "value", allow_duplicate=True),
-        Input("structure-selector", "value"),
+        Input("scene-tabs", "value"),
         State("topology-species", "value"),
         prevent_initial_call=True,
     )
-    def refresh_species_options(structure, current_value):
+    def refresh_species_options(scene_id, current_value):
+        structure = backend.get_state(scene_id).get("structure")
         opts = backend.species_options(structure)
         valid_values = {opt["value"] for opt in opts}
         keep = [v for v in (current_value or []) if v in valid_values]
@@ -1206,17 +1400,19 @@ def create_app(
     @app.callback(
         Output("topology-site-index", "value", allow_duplicate=True),
         Input("crystal-graph", "clickData"),
-        State("structure-selector", "value"),
+        State("scene-tabs", "value"),
         State("display-mode-selector", "value"),
         State("display-options", "value"),
         prevent_initial_call=True,
     )
-    def click_to_select_fragment(click_data, structure, display_mode, display_options):
+    def click_to_select_fragment(click_data, scene_id, display_mode, display_options):
         if not click_data or not click_data.get("points"):
             return no_update
         try:
+            structure = backend.get_state(scene_id).get("structure")
             state = backend.normalize_state(
                 {
+                    "scene_id": scene_id,
                     "structure": structure,
                     "display_mode": display_mode,
                     "display_options": display_options,
@@ -1236,13 +1432,13 @@ def create_app(
     @app.callback(
         Output("topology-site-index", "options"),
         Output("topology-site-index", "value", allow_duplicate=True),
-        Input("structure-selector", "value"),
+        Input("scene-tabs", "value"),
         Input("display-mode-selector", "value"),
         Input("display-options", "value"),
         State("topology-site-index", "value"),
         prevent_initial_call=True,
     )
-    def refresh_fragment_options(structure, display_mode, display_options, current_value):
+    def refresh_fragment_options(scene_id, display_mode, display_options, current_value):
         # The fragment options reflect the *scene* fragments, so they
         # change when the user switches structures, display modes
         # (formula unit / unit cell / cluster), or toggles hydrogens.
@@ -1250,8 +1446,10 @@ def create_app(
         # scene we clear the dropdown so the topology callback falls
         # back to the "first match of selected species" default.
         try:
+            structure = backend.get_state(scene_id).get("structure")
             state = backend.normalize_state(
                 {
+                    "scene_id": scene_id,
                     "structure": structure,
                     "display_mode": display_mode,
                     "display_options": display_options,
@@ -1265,18 +1463,53 @@ def create_app(
         return opts, keep
 
     @app.callback(
-        Output("structure-selector", "value", allow_duplicate=True),
+        Output("scene-tabs", "children", allow_duplicate=True),
+        Output("scene-tabs", "value", allow_duplicate=True),
+        Output("status", "children", allow_duplicate=True),
+        Input("scene-new-tab-btn", "n_clicks"),
+        Input("scene-rename-btn", "n_clicks"),
+        Input("scene-tab-close-active", "n_clicks"),
+        State("scene-tabs", "value"),
+        State("scene-tab-rename-input", "value"),
+        prevent_initial_call=True,
+    )
+    def mutate_scene_tabs(_, __, ___, active_scene_id, label):
+        triggered = callback_context.triggered[0]["prop_id"].split(".")[0] if callback_context.triggered else None
+        if not active_scene_id:
+            return no_update, no_update, no_update
+        try:
+            if triggered == "scene-new-tab-btn":
+                scene = backend.duplicate_scene(active_scene_id)
+                return backend.scene_tabs(), scene["id"], f"Duplicated scene: {scene['label']}"
+            if triggered == "scene-rename-btn":
+                scene = backend.update_scene(active_scene_id, {"label": label or ""})
+                return backend.scene_tabs(), scene["id"], f"Renamed scene: {scene['label']}"
+            if triggered == "scene-tab-close-active":
+                if len(backend.scene_options()) <= 1:
+                    return no_update, active_scene_id, "At least one scene tab must remain."
+                backend.delete_scene(active_scene_id)
+                return backend.scene_tabs(), backend.active_scene_id(), "Closed scene."
+        except Exception as exc:
+            return no_update, active_scene_id, f"Scene action failed: {exc}"
+        return no_update, active_scene_id, no_update
+
+    @app.callback(
+        Output("scene-tabs", "children", allow_duplicate=True),
+        Output("scene-tabs", "value", allow_duplicate=True),
+        Output("scene-tab-rename-input", "value"),
         Output("display-mode-selector", "value"),
         Output("display-options", "value"),
         Output("atom-scale-slider", "value"),
         Output("bond-radius-slider", "value"),
         Output("minor-opacity-slider", "value"),
+        Output("material-selector", "value"),
+        Output("style-selector", "value"),
+        Output("disorder-selector", "value"),
         Output("axis-scale-slider", "value"),
         Output("topology-species", "value"),
         Output("topology-site-index", "value"),
         Output("topology-toggle", "value"),
         Output("topology-hull-color", "value"),
-        Output("fast-rendering-toggle", "value"),
         Output("agent-state-store", "data"),
         Output("camera-state-store", "data"),
         Input("agent-state-poll", "n_intervals"),
@@ -1285,67 +1518,80 @@ def create_app(
     def sync_agent_state(_):
         state = backend.pop_pending_state()
         if not state:
-            return (no_update,) * 14
+            return (no_update,) * 18
         return (
-            state["structure"],
+            backend.scene_tabs(),
+            state.get("scene_id") or backend.active_scene_id(),
+            state.get("scene_label") or state["structure"],
             state["display_mode"],
             state["display_options"],
             state["atom_scale"],
             state["bond_radius"],
             state["minor_opacity"],
+            state.get("material", "mesh"),
+            state.get("style", "ball_stick"),
+            state.get("disorder", "outline_rings"),
             state["axis_scale"],
             list(state.get("topology_species_keys") or []),
             state["topology_site_index"],
             ["enabled"] if state.get("topology_enabled", True) else [],
             state.get("topology_hull_color", "#7C5CBF"),
-            ["fast"] if state.get("fast_rendering", False) else [],
             state,
             state.get("camera"),
         )
 
     @app.callback(
         Output("agent-state-store", "data", allow_duplicate=True),
-        Input("structure-selector", "value"),
+        Input("scene-tabs", "value"),
         Input("display-mode-selector", "value"),
         Input("display-options", "value"),
         Input("atom-scale-slider", "value"),
         Input("bond-radius-slider", "value"),
         Input("minor-opacity-slider", "value"),
+        Input("material-selector", "value"),
+        Input("style-selector", "value"),
+        Input("disorder-selector", "value"),
         Input("axis-scale-slider", "value"),
         Input("topology-species", "value"),
         Input("topology-site-index", "value"),
         Input("topology-toggle", "value"),
         Input("topology-hull-color", "value"),
-        Input("fast-rendering-toggle", "value"),
         prevent_initial_call=True,
     )
     def capture_state(
-        structure,
+        scene_id,
         display_mode,
         display_options,
         atom_scale,
         bond_radius,
         minor_opacity,
+        material,
+        render_style,
+        disorder,
         axis_scale,
         species_keys,
         site_index,
         topology_toggle,
         topology_hull_color,
-        fast_rendering_toggle,
     ):
+        if scene_id:
+            backend.set_active_scene(scene_id)
         patch: dict[str, Any] = {
-            "structure": structure,
+            "scene_id": scene_id,
             "display_mode": display_mode,
             "display_options": display_options,
             "atom_scale": atom_scale,
             "bond_radius": bond_radius,
             "minor_opacity": minor_opacity,
+            "material": material or "mesh",
+            "style": render_style or "ball_stick",
+            "disorder": disorder or "outline_rings",
             "axis_scale": axis_scale,
             "topology_species_keys": list(species_keys or []),
             "topology_site_index": None if site_index in ("", None) else int(site_index),
             "topology_enabled": "enabled" in (topology_toggle or []),
             "topology_hull_color": topology_hull_color or "#7C5CBF",
-            "fast_rendering": "fast" in (fast_rendering_toggle or []),
+            "fast_rendering": material == "flat",
         }
         backend.record_state(patch)
         return backend.get_state()

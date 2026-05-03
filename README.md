@@ -8,8 +8,8 @@ and a REST + WebSocket API for other agents, all out.
 ![banner](docs/images/banner.png)
 
 Everything in this README is reproduced from the bundled
-`examples/data/DAP-4.cif` (a triclinic diammonium diperchlorate `P1` cell,
-see [`examples/data/README.md`](examples/data/README.md)); swap it for your
+`scripts/data/DAP-4.cif` (a triclinic diammonium diperchlorate `P1` cell,
+see [`scripts/data/README.md`](scripts/data/README.md)); swap it for your
 own CIF with a single flag.
 
 ---
@@ -34,7 +34,7 @@ own CIF with a single flag.
   viewer from notebooks, agents or subprocesses (`GET /api/v1/state`,
   `POST /api/v1/topology`, `GET /api/v1/screenshot`, ...).
 - **Zero catalog required** — the package ships with a single public CIF so
-  `python -m crystal_viewer --cif examples/data/DAP-4.cif` just works.
+  `python -m crystal_viewer --cif scripts/data/DAP-4.cif` just works.
 
 ## Install
 
@@ -54,7 +54,7 @@ crystals.
 ## Launch the browser viewer
 
 ```bash
-python -m crystal_viewer --cif examples/data/DAP-4.cif
+python -m crystal_viewer --cif scripts/data/DAP-4.cif
 # Serving crystal viewer at http://127.0.0.1:8051
 ```
 
@@ -89,7 +89,7 @@ Putting it together for a Bohrium dev box:
 
 ```bash
 python -m crystal_viewer.app --host 0.0.0.0 --port 50001 \
-  --cif examples/data/DAP-4.cif --cif examples/data/SY.cif
+  --cif scripts/data/DAP-4.cif --cif scripts/data/SY.cif
 # Reachable at http://<your-id>.bohrium.tech:50001/
 ```
 
@@ -99,21 +99,21 @@ that container -- pick another from the `50001-50005` window.
 See [`AGENTS.md`](AGENTS.md) for every REST / WebSocket endpoint and the full
 set of stable UI element IDs.
 
-## Headless examples
+## Headless scripts
 
-Every script in [`examples/`](examples) can be run end-to-end without a
+Every script in [`scripts/`](scripts) can be run end-to-end without a
 browser:
 
 ```bash
-python examples/01_quick_render.py           # CIF -> PNG + interactive HTML
-python examples/02_coordination_analysis.py  # coordination shell + all scores
-python examples/03_display_modes_panel.py    # formula / unit cell / shell
-python examples/04_static_publication.py     # ORTEP-style PNG + PDF
-python examples/05_app_and_api.py            # launch app + drive it via REST
-python examples/06_cp2k_cube_orbital.py --cube orbital.cube  # CP2K/Gaussian cube isosurfaces
+python scripts/01_quick_render.py           # CIF -> PNG + interactive HTML
+python scripts/02_coordination_analysis.py  # coordination shell + all scores
+python scripts/03_display_modes_panel.py    # formula / unit cell / shell
+python scripts/04_static_publication.py     # ORTEP-style PNG + PDF
+python scripts/05_app_and_api.py            # launch app + drive it via REST
+python scripts/06_cp2k_cube_orbital.py --cube orbital.cube  # CP2K/Gaussian cube isosurfaces
 ```
 
-Outputs land under `examples/_outputs/` (gitignored). Regenerate the README
+Outputs land under `scripts/_outputs/` (gitignored). Regenerate the README
 showcase images with `python docs/build_images.py`.
 
 ### CP2K / Gaussian cube orbitals
@@ -123,7 +123,7 @@ and negative Plotly isosurfaces, with atom positions overlaid from the cube
 header:
 
 ```bash
-python examples/06_cp2k_cube_orbital.py \
+python scripts/06_cp2k_cube_orbital.py \
   --cube /path/to/cp2k-WFN_00292_1-1_0.cube \
   --output-prefix HOCO \
   --stride 2 \
@@ -142,7 +142,7 @@ from crystal_viewer.loader import build_bundle_scene, build_loaded_crystal
 from crystal_viewer.renderer import build_figure
 from crystal_viewer.scene import scene_style
 
-bundle = build_loaded_crystal(name="DAP-4", cif_path="examples/data/DAP-4.cif")
+bundle = build_loaded_crystal(name="DAP-4", cif_path="scripts/data/DAP-4.cif")
 scene  = build_bundle_scene(bundle, display_mode="unit_cell")
 style  = scene_style(scene, {"show_unit_cell": True})
 
@@ -159,7 +159,7 @@ fig.write_html("dap4.html", include_plotlyjs="cdn")
 from crystal_viewer.loader import build_loaded_crystal
 from crystal_viewer.topology import analyze_topology
 
-bundle = build_loaded_crystal(name="DAP-4", cif_path="examples/data/DAP-4.cif")
+bundle = build_loaded_crystal(name="DAP-4", cif_path="scripts/data/DAP-4.cif")
 # Pick the first DABCO ring -- in DAP-4 those have stoichiometry C6N2.
 target = next(f for f in bundle.topology_fragment_table if f.get("formula") == "C6N2")
 result = analyze_topology(bundle, center_index=target["index"], cutoff=8.0)
@@ -281,7 +281,7 @@ crystal_viewer/
 ├── presets.py           # preset / style / catalog IO
 ├── assets/              # Dash CSS + JS for the panel layout
 └── legacy/              # vendored static-export modules
-examples/                # runnable demo scripts (see section above)
+scripts/                # runnable demo scripts (see section above)
 docs/                    # README showcase images + scores.md
 ```
 
@@ -301,6 +301,6 @@ docs/                    # README showcase images + scores.md
 ## Citing
 
 If you use the bundled example structure, please also credit the originating
-publication that released it — see [`examples/data/README.md`](examples/data/README.md).
+publication that released it — see [`scripts/data/README.md`](scripts/data/README.md).
 The `crystal_viewer` code itself is released under the repository's root
 license file.

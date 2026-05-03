@@ -2,7 +2,7 @@
 
 Run from the repository root:
 
-    python examples/04_static_publication.py
+    python scripts/04_static_publication.py
 
 Uses ``crystal_viewer.legacy.plot_crystal``  -  the same code that powers
 ``POST /api/v1/export``  -  to draw a high-DPI Axes3D figure that prints well

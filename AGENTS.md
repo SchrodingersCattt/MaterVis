@@ -20,12 +20,14 @@ MatterVis/
 │   ├── legacy/          ← vendored matplotlib pipeline; do not extend
 │   ├── loader.py        ← structure ingestion
 │   ├── presets.py
+│   ├── scenes.py        ← tab/session scene state
+│   ├── ortep.py         ← thermal ellipsoid geometry + traces
 │   ├── renderer.py      ← `build_figure` Plotly assembly + `uniform_viewport`
 │   ├── scene.py         ← cell/cluster scene builder
 │   └── topology.py
 ├── docs/                ← sphinx sources, score tables
-├── examples/            ← runnable scripts that exercise the public API
-└── scripts/             ← local/private analysis scripts; keep unpublished data ignored
+├── scripts/             ← runnable scripts that exercise the public API
+│   └── private/         ← local/private analysis scripts; keep unpublished data ignored
 ```
 
 When adding a new feature, the module it belongs in is almost always
@@ -61,7 +63,7 @@ should be rejected and rewritten.
    dicts breaks concurrent jobs and silently corrupts unrelated
    render pipelines.
 5. **Static export must be visually verified.** If you change any
-   rendering code, regenerate the relevant `examples/` figure and
+   rendering code, regenerate the relevant `scripts/` figure and
    open the saved PNG/PDF. Plotly + Kaleido fails silently on
    layout/transparency/legend issues; a clean exit code does not
    imply a correct figure.
@@ -121,6 +123,21 @@ both files.
 - `build_figure` honours `show_title`, `axes_labels`,
   `element_colors`, `element_colors_light` style keys beyond the
   Dash defaults.
+- `material`, `style`, and `disorder` are independent style axes:
+  material chooses flat vs Mesh3d, style chooses ball/stick/ORTEP
+  language, and disorder chooses how partial occupancy is marked.
+  Do not re-couple disorder to opacity-only rendering.
+
+### `crystal_viewer.ortep` — see [`agents/ortep_api.md`](agents/ortep_api.md)
+
+- ORTEP has the same layered shape as other public APIs: pure math
+  (`ellipsoid_principal_axes`, `ortep_mesh3d`), trace builders, then
+  convenience wrappers.
+- The default ORTEP probability is 50%; callers can override it per
+  call with `ortep_probability`.
+- `material="mesh", style="ortep"` renders real 3D ellipsoid meshes;
+  `material="flat", style="ortep"` renders camera-facing publication
+  billboards.
 
 ### Dash service — see [`agents/dash_service.md`](agents/dash_service.md)
 
@@ -135,8 +152,8 @@ both files.
 ## Tests, lint, build
 
 - Unit tests: `pytest crystal_viewer/`.
-- Examples regression: `python examples/<n>_*.py` regenerates the
-  paired figure in `examples/_outputs/`. Visually inspect before
+- Examples regression: `python scripts/<n>_*.py` regenerates the
+  paired figure in `scripts/_outputs/`. Visually inspect before
   merging.
 - Lint: `ruff check crystal_viewer/`.
 
@@ -153,7 +170,7 @@ both files.
 4. Add an entry to the appropriate file under `agents/`. If the
    feature does not fit any existing file, create a new one and link
    it from `agents/README.md`.
-5. Add a runnable example under `examples/` if the feature is a
+5. Add a runnable example under `scripts/` if the feature is a
    user-facing capability.
 6. Add unit tests for the pure-math layer at minimum; add integration
    tests for wrappers when the behaviour is non-trivial (transparency
@@ -162,6 +179,6 @@ both files.
 ## When you change a public API
 
 1. Update the matching `agents/*.md` file.
-2. Update affected `examples/` scripts.
+2. Update affected `scripts/` scripts.
 3. If the change is back-incompatible, bump the API version and call
    it out in the PR description.

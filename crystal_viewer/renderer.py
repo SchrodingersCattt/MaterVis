@@ -7,6 +7,50 @@ import numpy as np
 import plotly.graph_objects as go
 
 
+MATERIAL_DISPATCH = {"flat": "_scatter_atom_base", "mesh": "_mesh3d_atom_base"}
+STYLE_DISPATCH = {
+    "ball": "_sphere_geom",
+    "ball_stick": "_sphere_geom",
+    "stick": "_stick_only_geom",
+    "ortep": "_ellipsoid_geom",
+    "wireframe": "_ring_geom",
+}
+DISORDER_DISPATCH = {
+    "opacity": "_disorder_alpha",
+    "dashed_bonds": "_disorder_dash",
+    "outline_rings": "_disorder_outline",
+    "color_shift": "_disorder_color",
+    "none": "_disorder_noop",
+}
+
+
+def validate_style_schema(style: dict) -> dict:
+    material = str(style.get("material", "mesh"))
+    render_style = str(style.get("style", "ball_stick"))
+    disorder = str(style.get("disorder", "outline_rings"))
+    if material not in MATERIAL_DISPATCH:
+        raise ValueError(f"unknown material: {material}")
+    if render_style not in STYLE_DISPATCH:
+        raise ValueError(f"unknown style: {render_style}")
+    if disorder not in DISORDER_DISPATCH:
+        raise ValueError(f"unknown disorder mode: {disorder}")
+    normalized = dict(style)
+    normalized["material"] = material
+    normalized["style"] = render_style
+    normalized["disorder"] = disorder
+    normalized["fast_rendering"] = bool(normalized.get("fast_rendering", False)) or material == "flat"
+    normalized["minor_wireframe"] = bool(normalized.get("minor_wireframe", False)) or disorder == "outline_rings"
+    return normalized
+
+
+def _minor_opacity_for(style: dict, is_minor: bool) -> float:
+    if not is_minor:
+        return float(style.get("major_opacity", 1.0))
+    if style.get("disorder") == "opacity":
+        return max(0.05, float(style.get("minor_opacity", 0.35)))
+    return 1.0
+
+
 def _normalize(vec: Iterable[float], fallback: Iterable[float]) -> np.ndarray:
     arr = np.array(list(vec), dtype=float)
     if arr.shape != (3,) or np.linalg.norm(arr) < 1e-8:
@@ -190,11 +234,26 @@ def _style_bool(style: dict, key: str, default: bool = False) -> bool:
     return bool(style.get(key, default))
 
 
-def style_from_controls(atom_scale, bond_radius, minor_opacity, axis_scale, options) -> dict:
+def style_from_controls(
+    atom_scale,
+    bond_radius,
+    minor_opacity,
+    axis_scale,
+    options,
+    *,
+    material: str | None = None,
+    render_style: str | None = None,
+    disorder: str | None = None,
+) -> dict:
     options = set(options or [])
-    return {
+    resolved_material = material or ("flat" if "fast_rendering" in options else "mesh")
+    resolved_disorder = disorder or ("outline_rings" if "minor_wireframe" in options else "opacity")
+    style = {
         "atom_scale": float(atom_scale),
         "bond_radius": float(bond_radius),
+        "material": resolved_material,
+        "style": render_style or "ball_stick",
+        "disorder": resolved_disorder,
         "minor_opacity": float(minor_opacity),
         "axis_scale": float(axis_scale),
         "show_labels": "labels" in options,
@@ -206,6 +265,7 @@ def style_from_controls(atom_scale, bond_radius, minor_opacity, axis_scale, opti
         "fast_rendering": "fast_rendering" in options,
         "topology_enabled": "topology" in options,
     }
+    return validate_style_schema(style)
 
 
 def _unit_sphere(lat_steps: int = 9, lon_steps: int = 14) -> Tuple[np.ndarray, np.ndarray]:
@@ -391,7 +451,7 @@ def _bond_mesh_traces(scene: dict, style: dict):
     for (color, is_minor), payload in groups.items():
         vertices, triangles = _cylinder_mesh_batch(
             payload["segments"],
-            radius * (float(style["minor_bond_scale"]) if is_minor else 1.0),
+            radius * (float(style.get("minor_bond_scale", 0.82)) if is_minor else 1.0),
             sides=6,
         )
         if len(vertices) == 0:
@@ -405,7 +465,7 @@ def _bond_mesh_traces(scene: dict, style: dict):
                 j=triangles[:, 1],
                 k=triangles[:, 2],
                 color=color,
-                opacity=float(style["minor_opacity"]) if is_minor else 1.0,
+                opacity=_minor_opacity_for(style, is_minor),
                 hoverinfo="skip",
                 showlegend=False,
                 flatshading=False,
@@ -457,7 +517,7 @@ def _atom_mesh_traces(scene: dict, style: dict):
                 j=triangles[:, 1],
                 k=triangles[:, 2],
                 color=color,
-                opacity=max(0.48, float(style["minor_opacity"])) if is_minor else float(style.get("major_opacity", 1.0)),
+                opacity=_minor_opacity_for(style, is_minor),
                 hoverinfo="skip",
                 showlegend=False,
                 flatshading=False,
@@ -485,8 +545,8 @@ def _bond_scatter_traces(scene: dict, style: dict):
                 y=ys,
                 z=zs,
                 mode="lines",
-                line=dict(color=color, width=base_width * (float(style["minor_bond_scale"]) if is_minor else 1.0)),
-                opacity=float(style["minor_opacity"]) if is_minor else 1.0,
+                line=dict(color=color, width=base_width * (float(style.get("minor_bond_scale", 0.82)) if is_minor else 1.0)),
+                opacity=_minor_opacity_for(style, is_minor),
                 hoverinfo="skip",
                 showlegend=False,
             )
@@ -526,7 +586,7 @@ def _atom_scatter_traces(scene: dict, style: dict):
                 marker=dict(
                     size=payload["size"],
                     color=payload["color"],
-                    opacity=max(0.48, float(style["minor_opacity"])) if is_minor else float(style.get("major_opacity", 1.0)),
+                    opacity=_minor_opacity_for(style, is_minor),
                     line=dict(color="#444444" if is_minor else payload["color"], width=3.5 if is_minor else 0),
                 ),
                 showlegend=False,
@@ -537,7 +597,7 @@ def _atom_scatter_traces(scene: dict, style: dict):
 
 
 def _minor_bond_wireframe_traces(scene: dict, style: dict):
-    if not style.get("minor_wireframe", False):
+    if style.get("disorder") not in ("outline_rings", "dashed_bonds") and not style.get("minor_wireframe", False):
         return []
     segments = []
     for bond in scene["bonds"]:
@@ -586,6 +646,8 @@ def _minor_outline_traces(scene: dict, style: dict):
     pixel-fixed width meant the disorder outlines stayed the same
     screen size when the camera dollied out -- and ate the atoms whole
     once the structure shrank."""
+    if style.get("disorder") not in ("outline_rings", "color_shift") and not style.get("minor_wireframe", False):
+        return []
     minors = []
     for atom in scene["draw_atoms"]:
         if not atom["is_minor"]:
@@ -1473,6 +1535,9 @@ def _cached_atom_bond_meshes(scene: dict, style: dict, *, use_fast: bool):
     cache = scene.setdefault("_mesh_trace_cache", {})
     key = (
         bool(use_fast),
+        str(style.get("material", "mesh")),
+        str(style.get("style", "ball_stick")),
+        str(style.get("disorder", "outline_rings")),
         bool(style.get("show_minor_only", False)),
         round(float(style.get("atom_scale", 1.0)), 3),
         round(float(style.get("bond_radius", 0.1)), 3),
@@ -1482,7 +1547,14 @@ def _cached_atom_bond_meshes(scene: dict, style: dict, *, use_fast: bool):
     )
     if key in cache:
         return cache[key]
-    if use_fast:
+    if style.get("style") == "ortep":
+        from .ortep import ortep_atom_billboard_traces, ortep_atom_mesh_traces, ortep_axis_dash_traces, ortep_octant_shade_traces
+
+        atom_traces = ortep_atom_billboard_traces(scene, style) if use_fast else ortep_atom_mesh_traces(scene, style)
+        bond_traces = _bond_scatter_traces(scene, style) if use_fast else _bond_mesh_traces(scene, style)
+        atom_traces.extend(ortep_axis_dash_traces(scene, style))
+        atom_traces.extend(ortep_octant_shade_traces(scene, style))
+    elif use_fast:
         atom_traces = _atom_scatter_traces(scene, style)
         bond_traces = _bond_scatter_traces(scene, style)
     else:
@@ -1501,6 +1573,7 @@ def _cached_atom_bond_meshes(scene: dict, style: dict, *, use_fast: bool):
 
 
 def build_figure(scene: dict, style: dict, topology_data: dict | None = None) -> go.Figure:
+    style = validate_style_schema(style)
     xr, yr, zr = _scene_ranges(scene, style, topology_data=topology_data if style.get("topology_enabled", True) else None)
     # Mesh3d atoms are 3D world-coordinate spheres -- they grow when the
     # camera dollies in, which is what users expect from "zoom". Scatter3d
@@ -1510,7 +1583,7 @@ def build_figure(scene: dict, style: dict, topology_data: dict | None = None) ->
     # in place even ~700-atom scenes stay responsive on the warm path,
     # so the threshold is now ~3x looser. The explicit "Fast rendering
     # fallback" checkbox remains the user-controlled escape hatch.
-    use_fast = bool(style.get("fast_rendering", False)) or len(scene.get("draw_atoms", [])) > 2000
+    use_fast = bool(style.get("fast_rendering", False)) or style.get("material") == "flat" or len(scene.get("draw_atoms", [])) > 2000
 
     mesh_payload = _cached_atom_bond_meshes(scene, style, use_fast=use_fast)
     topology_on = bool(style.get("topology_enabled", True)) and topology_data is not None

@@ -30,7 +30,7 @@ DEFAULT_STYLE = {
 DEFAULT_CATALOG = {
     "DAP-4": {
         "title": "DAP-4  (P1, Z=12)",
-        "relative_cif": os.path.join("examples", "data", "DAP-4.cif"),
+        "relative_cif": os.path.join("scripts", "data", "DAP-4.cif"),
     },
 }
 

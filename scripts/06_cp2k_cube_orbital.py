@@ -2,7 +2,7 @@
 
 Run from the repository root:
 
-    python examples/06_cp2k_cube_orbital.py --cube /path/to/orbital.cube
+    python scripts/06_cp2k_cube_orbital.py --cube /path/to/orbital.cube
 
 The HTML output is always written. PNG export is attempted when Kaleido is
 available in the local environment.
@@ -28,7 +28,7 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cube", required=True, help="Input .cube file")
-    parser.add_argument("--output-prefix", default=None, help="Output file stem under examples/_outputs")
+    parser.add_argument("--output-prefix", default=None, help="Output file stem under scripts/_outputs")
     parser.add_argument("--stride", type=int, default=2, help="Grid stride for interactive rendering")
     parser.add_argument("--percentile", type=float, default=98.5, help="Abs(value) percentile for isovalue")
     parser.add_argument("--isovalue", type=float, default=None, help="Explicit isovalue; overrides percentile")

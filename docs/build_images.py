@@ -32,7 +32,7 @@ from crystal_viewer.scene import scene_style  # noqa: E402
 from crystal_viewer.topology import analyze_topology  # noqa: E402
 
 
-CIF = REPO_ROOT / "examples" / "data" / "DAP-4.cif"
+CIF = REPO_ROOT / "scripts" / "data" / "DAP-4.cif"
 IMG_DIR = REPO_ROOT / "docs" / "images"
 IMG_DIR.mkdir(parents=True, exist_ok=True)
 

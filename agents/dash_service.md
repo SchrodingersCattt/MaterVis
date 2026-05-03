@@ -4,23 +4,30 @@ The interactive Dash app exposes a REST + WebSocket API for driving the
 running viewer programmatically — uploads, state changes, screenshots,
 preset save/load.
 
-- Base URL: `http://{host}:{port}/api/v1`
-- WebSocket: `ws://{host}:{port}/api/v1/ws`
+- Base URL: `http://{host}:{port}/api/v2`
+- WebSocket: `ws://{host}:{port}/api/v2/ws`
+
+`/api/v1` is a deprecated active-scene shim for one transition release.
 
 ## REST endpoints
 
 - `GET /state`
-  Returns the full viewer state.
+  Returns the full viewer state. Add `?scene_id=...` to target a
+  non-active tab.
 - `POST /state`
   Accepts any subset of:
   `structure`, `display_mode`, `atom_scale`, `bond_radius`,
-  `minor_opacity`, `axis_scale`, `display_options`,
+  `material`, `style`, `disorder`, `minor_opacity`, `axis_scale`,
+  `display_options`,
   `topology_species_keys` (list of stoichiometric formulas like
   `"C8N1"`, `"ClO4"`, `"N1"` -- one polyhedron per matching fragment
   for every key in the list, which gives a tiled view "for free"),
   `topology_site_index` (primary site for the histogram /
   results panel), `topology_enabled`, `topology_hull_color`,
-  `fast_rendering`, `camera`, `cutoff`.
+  `fast_rendering`, `camera`, `cutoff`. `material` is `mesh` or
+  `flat`; `style` is `ball`, `ball_stick`, `stick`, `ortep`, or
+  `wireframe`; `disorder` is `opacity`, `dashed_bonds`,
+  `outline_rings`, `color_shift`, or `none`.
 
   Legacy aliases that still work: `topology_fragment_type` (`"A"` /
   `"B"` / `"X"`) is translated to the matching list of species keys
@@ -39,6 +46,21 @@ preset save/load.
   `{"action": "orbit", "yaw_deg": 12, "pitch_deg": -6}`,
   `{"action": "pan", "dx": 0.05, "dy": -0.03, "dz": 0.0}`,
   `{"action": "reset"}`.
+- `GET /scenes`
+  Lists scene tabs and the active scene id.
+- `POST /scenes`
+  Creates a tab. Body: `{"structure": "DAP-4", "label": "view A",
+  "state": {...}}`.
+- `PATCH /scenes/{id}`
+  Renames or patches a tab.
+- `DELETE /scenes/{id}`
+  Closes a tab.
+- `POST /scenes/{id}/duplicate`
+  Duplicates a tab.
+- `POST /scenes/reorder`
+  Body: `{"order": ["scene_a", "scene_b"]}`.
+- `GET /scenes/active` / `POST /scenes/active`
+  Reads or changes the active scene.
 - `POST /upload`
   Multipart form upload with field `file`.
 - `GET /structures`
@@ -62,12 +84,20 @@ preset save/load.
 Use these when scripting through Selenium / Playwright / Dash testing
 hooks rather than the REST surface.
 
-- `structure-selector`: structure radio list
-- `cif-upload`: upload zone
+- `scene-tabs`: scene tab row
+- `scene-tab-{id}`: individual scene tab
+- `scene-tab-close-{id}`: per-tab close button when rendered
+- `scene-new-tab-btn`: duplicate/new scene button
+- `scene-tab-rename-input`: active scene rename input
+- `scene-cif-upload`: upload zone
 - `display-options`: labels / axes / minor-only / wireframe checklist
 - `display-mode-selector`: `formula_unit`, `unit_cell`,
   `asymmetric_unit`, `cluster`
-- `fast-rendering-toggle`: mesh fallback toggle
+- `material-selector`: `mesh`, `flat`
+- `style-selector`: `ball`, `ball_stick`, `stick`, `ortep`,
+  `wireframe`
+- `disorder-selector`: `opacity`, `dashed_bonds`, `outline_rings`,
+  `color_shift`, `none`
 - `atom-scale-slider`
 - `bond-radius-slider`
 - `minor-opacity-slider`
@@ -84,12 +114,13 @@ hooks rather than the REST surface.
 ## Suggested automation pattern
 
 1. `POST /upload` with a CIF file.
-2. `POST /state` to select the uploaded structure or set
-   render/display controls.
-3. `POST /topology` with a chosen `center_index`.
-4. `POST /camera/action` to zoom/orbit/pan if needed.
-5. `GET /screenshot` to capture the current viewport.
-6. `POST /preset/save` if the tuned state should be persisted.
+2. `GET /scenes` to discover the uploaded scene tab id.
+3. `POST /state?scene_id=...` to set render/display controls without
+   disturbing the user's active tab.
+4. `POST /topology?scene_id=...` with a chosen `center_index`.
+5. `POST /camera/action?scene_id=...` to zoom/orbit/pan if needed.
+6. `GET /screenshot?scene_id=...` to capture that scene.
+7. `POST /preset/save` if the tuned state should be persisted.
 
 ## WebSocket messages
 
